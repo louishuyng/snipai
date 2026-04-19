@@ -2,7 +2,7 @@ NVIM    ?= nvim
 DEPS    := .deps
 PLENARY := $(DEPS)/plenary.nvim
 
-.PHONY: help deps test test-unit test-file format format-check lint clean
+.PHONY: help deps test test-unit test-file smoke format format-check lint clean
 
 help:
 	@echo "snipai make targets:"
@@ -10,6 +10,7 @@ help:
 	@echo "  make test          run full test suite"
 	@echo "  make test-unit     run unit tests only (fastest)"
 	@echo "  make test-file F=tests/unit/foo_spec.lua   run one spec"
+	@echo "  make smoke         release-time: run real claude CLI through the runner"
 	@echo "  make format        format all lua with stylua"
 	@echo "  make format-check  check formatting without modifying"
 	@echo "  make lint          stylua --check + luacheck (if installed)"
@@ -37,6 +38,10 @@ test-file: deps
 	@$(NVIM) --headless --noplugin -u tests/minimal_init.lua \
 		-c "PlenaryBustedFile $(F)" \
 		-c "qa!"
+
+smoke:
+	@command -v claude >/dev/null 2>&1 || { echo "smoke: \`claude\` CLI not on PATH" >&2; exit 2; }
+	@$(NVIM) --headless --noplugin -u tests/minimal_init.lua -l scripts/smoke.lua
 
 format:
 	@stylua lua/ tests/

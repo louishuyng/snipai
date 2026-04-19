@@ -355,7 +355,7 @@ require("snipai").setup({
 
 ## Statusline integration
 
-`require("snipai.statusline").status(bufnr?)` returns a short indicator string you can drop straight into a statusline. Empty (`""`) when nothing relevant is in flight; `"⟳ snipai"` when one of the currently-running jobs has already emitted an `Edit` / `Write` / `MultiEdit` for the buffer's file. Cheap enough to call on every redraw — guards against being called before `setup()`, against invalid bufnrs, and against unnamed scratch buffers.
+`require("snipai.statusline").status(bufnr?)` returns an animated indicator string you can drop straight into a statusline. Empty (`""`) when nothing relevant is in flight; a braille-spinner frame + `" snipai"` (e.g. `⠋ snipai`) when one of the currently-running jobs either was triggered from the buffer's file or has already emitted an `Edit` / `Write` / `MultiEdit` for it. A background `uv` timer advances the spinner frame every 100ms and calls `:redrawstatus` — it only runs while at least one job is active, so there is zero cost when the plugin is idle. Guards against being called before `setup()`, against invalid bufnrs, and against unnamed scratch buffers, so it is cheap to call on every redraw.
 
 ```lua
 -- native statusline

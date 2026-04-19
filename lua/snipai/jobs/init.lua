@@ -59,6 +59,7 @@ function Manager:spawn(snippet, params, ctx)
     claude_opts = self._claude_opts,
     now = self._now,
     id = self._id,
+    cursor_file = builtins and builtins.cursor_file,
   })
 
   -- Subscribe BEFORE start so a synchronous on_exit (fake runner in tests)

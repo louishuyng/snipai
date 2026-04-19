@@ -129,6 +129,7 @@ function M.new(opts)
     _claude_opts = opts.claude_opts or {},
     _now = opts.now or default_now,
     _id = (opts.id or default_id)(),
+    _cursor_file = opts.cursor_file,
     _status = "pending",
     _files_changed = {},
     _files_seen = {},
@@ -175,6 +176,14 @@ function Job:files_changed()
     out[i] = p
   end
   return out
+end
+
+-- Absolute path of the buffer the snippet was triggered from (may be nil
+-- for programmatic / headless triggers). Captured once at spawn time so
+-- statusline attribution works from the instant the job starts, before
+-- any tool_use event has fired.
+function Job:cursor_file()
+  return self._cursor_file
 end
 
 function Job:started_at()

@@ -31,6 +31,7 @@ local registry_mod = require("snipai.registry")
 local jobs_mod = require("snipai.jobs")
 local param_form_mod = require("snipai.ui.param_form")
 local trigger_mod = require("snipai.trigger")
+local statusline_mod = require("snipai.statusline")
 
 -- ---------------------------------------------------------------------------
 -- Built-in context + buffer helpers (injectable via _deps for tests)
@@ -180,6 +181,11 @@ function M.setup(opts)
     local files = job and type(job.files_changed) == "function" and job:files_changed() or {}
     state.refresh_buffers(files)
   end)
+
+  -- Statusline spinner subscribes to the same bus; it manages its own
+  -- active-count + timer lifecycle so the indicator appears the instant
+  -- a job starts and clears the moment the last one finishes.
+  statusline_mod.attach(events)
 
   return M
 end

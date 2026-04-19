@@ -307,12 +307,20 @@ require("snipai").setup({
 
   claude = {
     cmd        = "claude",
-    -- Auto-accept Edit / Write / MultiEdit tool uses in non-interactive
-    -- mode. Without this, `claude -p` silently skips file writes and
-    -- snippets that are supposed to modify files complete with zero
-    -- changes. Override with { "--permission-mode", "plan" } for a
-    -- read-only dry run, or any other Claude CLI flags you want passed.
-    extra_args = { "--permission-mode", "acceptEdits" },
+    -- Two defaults worth knowing about:
+    --   * --permission-mode acceptEdits — auto-accepts Edit/Write/MultiEdit
+    --     in non-interactive mode (without it, `claude -p` silently
+    --     skips file writes).
+    --   * --setting-sources "" — loads no settings sources for the
+    --     invocation, which suppresses user-installed Claude Code
+    --     plugins (superpowers, etc.) and their SessionStart hooks for
+    --     this one run. Real speedup (~2–3× on typical workloads)
+    --     because the plugin bootstrap injects 12k+ tokens of context
+    --     into every non-interactive session. Keychain auth, memory,
+    --     CLAUDE.md discovery, and MCP servers are unaffected.
+    -- This field is a nested array, so your value REPLACES the default
+    -- outright — pass the full list you want claude to see.
+    extra_args = { "--permission-mode", "acceptEdits", "--setting-sources", "" },
     timeout_ms = 5 * 60 * 1000, -- 5 min per run
   },
 

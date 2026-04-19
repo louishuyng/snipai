@@ -64,15 +64,28 @@ function M.defaults(env)
     },
     claude = {
       cmd = "claude",
-      -- acceptEdits is the right default for a plugin whose whole point
-      -- is AI snippets that edit files. Non-interactive `claude -p` runs
-      -- with permission-mode=default otherwise, which silently skips
-      -- Edit / Write / MultiEdit tool uses because there is nobody to
-      -- approve them. Users who want stricter behaviour can override:
-      --   setup({ claude = { extra_args = { "--permission-mode", "plan" } } })
-      -- `extra_args` is a nested array, so user values REPLACE the
-      -- default outright — pass the full list you want claude to see.
-      extra_args = { "--permission-mode", "acceptEdits" },
+      -- Defaults explained:
+      --
+      --   --permission-mode acceptEdits
+      --     Non-interactive `claude -p` runs with permission-mode=default
+      --     otherwise, which silently skips Edit / Write / MultiEdit
+      --     tool uses because there is nobody to approve them.
+      --
+      --   --setting-sources ""
+      --     Loads no settings sources for this invocation. Suppresses
+      --     user-installed Claude Code plugins (superpowers, etc.),
+      --     their SessionStart hooks, and their skill bundles — a
+      --     real speedup (measured ~45s → ~18s on a two-file scaffold)
+      --     because the plugin bootstrap injects 12k+ tokens into
+      --     every non-interactive session. Keychain auth, auto-memory,
+      --     CLAUDE.md auto-discovery, and MCP servers are unaffected;
+      --     interactive `claude` sessions are unaffected.
+      --
+      -- Override with setup({ claude = { extra_args = {...} } }) — the
+      -- field is a nested array, so user values REPLACE this default
+      -- outright. If you want plugins back in your snipai runs, pass
+      -- the full list you want claude to see.
+      extra_args = { "--permission-mode", "acceptEdits", "--setting-sources", "" },
       timeout_ms = 5 * 60 * 1000,
     },
     ui = {

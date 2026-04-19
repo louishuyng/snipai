@@ -178,6 +178,28 @@ function Store:count()
   return n
 end
 
+-- Rewrite the file with exactly `entries` (one JSON object per line).
+-- Pairs with read_all for any "load → mutate → save" workflow. Empty
+-- `entries` truncates the file to zero bytes (use clear() to unlink).
+function Store:write_all(entries)
+  if type(entries) ~= "table" then
+    return nil, "entries must be a table"
+  end
+  local lines = {}
+  for i, e in ipairs(entries) do
+    local encoded, err = self._json_encode(e)
+    if encoded == nil then
+      return nil, ("entry %d: %s"):format(i, tostring(err))
+    end
+    lines[#lines + 1] = encoded
+  end
+  self:_ensure_parent_dir()
+  if #lines == 0 then
+    return self._fs.write_all(self._path, "")
+  end
+  return self._fs.write_all(self._path, table.concat(lines, "\n") .. "\n")
+end
+
 -- Keep at most `max` most-recent entries by rewriting the file.
 -- Returns (true) on success or (nil, err) on an encode/write failure.
 function Store:prune(max)
@@ -186,16 +208,11 @@ function Store:prune(max)
     return true
   end
   local keep_from = #entries - max + 1
-  local lines = {}
+  local kept = {}
   for i = keep_from, #entries do
-    local encoded, err = self._json_encode(entries[i])
-    if encoded == nil then
-      return nil, err
-    end
-    lines[#lines + 1] = encoded
+    kept[#kept + 1] = entries[i]
   end
-  self:_ensure_parent_dir()
-  return self._fs.write_all(self._path, table.concat(lines, "\n") .. "\n")
+  return self:write_all(kept)
 end
 
 function Store:clear()

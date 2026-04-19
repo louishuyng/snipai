@@ -222,6 +222,39 @@ describe("snipai.history.store", function()
   end)
 
   -- ========================================================================
+  -- write_all
+  -- ========================================================================
+  describe("write_all", function()
+    it("rewrites the file with exactly the provided entries", function()
+      local s = new_store()
+      s:append({ id = "a" })
+      s:append({ id = "b" })
+      s:append({ id = "c" })
+
+      assert.is_true(s:write_all({ { id = "x" }, { id = "y" } }))
+      local entries = s:read_all()
+      assert.equals(2, #entries)
+      assert.equals("x", entries[1].id)
+      assert.equals("y", entries[2].id)
+    end)
+
+    it("truncates the file when given an empty list", function()
+      local s, fs = new_store()
+      s:append({ id = "a" })
+      assert.is_true(s:write_all({}))
+      assert.equals("", fs._files["/history.jsonl"])
+      assert.are.same({}, s:read_all())
+    end)
+
+    it("rejects non-table argument", function()
+      local s = new_store()
+      local ok, err = s:write_all("nope")
+      assert.is_nil(ok)
+      assert.matches("must be a table", err)
+    end)
+  end)
+
+  -- ========================================================================
   -- clear
   -- ========================================================================
   describe("clear", function()

@@ -36,7 +36,7 @@ This document is the map of the codebase. It covers the folder layout, what each
                                ▼              ▼
                 ┌────────────────────┐  ┌──────────────────────┐
                 │  CLAUDE BACKEND    │  │       UI / PICKERS    │
-                │  runner (vim.system)│ │  Volt popups (param,  │
+                │  runner (vim.system)│ │  vim.ui popups (param,│
                 │  stream-json parser│  │   detail)              │
                 │  event normalizer  │  │  Telescope pickers    │
                 └────────────────────┘  │  notify abstraction   │
@@ -48,7 +48,7 @@ This document is the map of the codebase. It covers the folder layout, what each
 1. Core has **zero knowledge** of UI, cmp, or Telescope. It exposes functions and emits events; consumers decide what to do.
 2. The Claude backend sits behind one interface (`run(prompt, opts) -> job_handle`) so a future Anthropic-API or self-hosted backend drops in without touching core.
 3. Adapters are **thin** (~50 LoC each): the cmp source, blink source, and `:Snipai*` commands are all small translators.
-4. UI is **pluggable**: Volt for popups, Telescope for pickers, `notify` auto-detects its backend. Each has a sensible fallback.
+4. UI is **pluggable**: `vim.ui.input` / `vim.ui.select` for prompts (upgraded by any `dressing.nvim` / `snacks.nvim` / `telescope-ui-select` override the user has installed), Telescope for pickers, `notify` auto-detects its backend. Each has a sensible fallback.
 5. The event bus is the seam between async work and UI. Running-jobs picker **subscribes** to `job_*` events for live updates — it never polls.
 
 ---
@@ -77,8 +77,8 @@ snipai/
 │       │   ├── parser.lua           -- stream-json NDJSON parser (pure function)
 │       │   └── events.lua           -- normalized event shape {kind, payload}
 │       ├── ui/
-│       │   ├── volt.lua             -- Volt availability check + shared helpers
-│       │   ├── param_form.lua       -- popup to collect snippet parameters
+│       │   ├── popup.lua            -- vim.ui.* facade for typed-field collection
+│       │   ├── param_form.lua       -- snippet-aware form driven by ui.popup
 │       │   └── detail.lua           -- popup showing a single history entry
 │       ├── pickers/
 │       │   ├── running.lua          -- Telescope picker of active jobs
@@ -148,13 +148,13 @@ Each file has **one** purpose. If you find yourself reaching for a second one, i
 | `history.store` | `append(entry)`, `read_all()`, `prune(max)` | JSONL on-disk storage. Pure-ish: takes a path, returns entries. Atomic append via O_APPEND. |
 | `history` | `add_pending`, `finalize`, `list`, `get`, `clear`, `to_quickfix` | public history API. Uses `store` for persistence, subscribes to `job_*` events to record lifecycle. |
 
-### UI (depends on Volt; only touched when a user acts)
+### UI (wraps `vim.ui.*`; only touched when a user acts)
 
 | Module | Exports | Role |
 |---|---|---|
-| `ui.volt` | `ensure_loaded()`, shared window helpers | centralizes Volt setup so other UI modules don't each probe for it. |
-| `ui.param_form` | `open(snippet, on_submit, on_cancel)` | Volt popup collecting typed param values, per-field validation hints, submit-gated. |
-| `ui.detail` | `open(history_entry)` | Volt popup showing one history entry: prompt, params, status, duration, `files_changed`, stdout. |
+| `ui.popup` | `collect(fields, opts)` | sequential `vim.ui.input` / `vim.ui.select` chain for a list of typed fields; boolean is a two-option select mapped back to Lua booleans; both `vim.ui.*` fns are injectable for tests and alternate backends. |
+| `ui.param_form` | `open(snippet, opts)` | snippet-aware layer: builds an ordered field list from `snippet.parameter`, delegates to `ui.popup`, resolves defaults and validates via `params.validate_all`, surfaces errors through the notifier, guarantees `on_submit` fires only with valid values. |
+| `ui.detail` | `open(history_entry)` | popup showing one history entry: prompt, params, status, duration, `files_changed`, stdout. |
 
 ### Pickers (depends on Telescope)
 
@@ -167,7 +167,7 @@ Each file has **one** purpose. If you find yourself reaching for a second one, i
 
 | Module | Exports | Role |
 |---|---|---|
-| `sources.cmp` | nvim-cmp source object | translates cmp context into `registry.lookup_prefix`, handles `execute()` to call `snipai.trigger`. |
+| `sources.cmp` | `new(snipai_api?)`, `register(snipai_api?, cmp_mod?)` | nvim-cmp source. `complete()` maps `registry:lookup_prefix` to cmp items (`insertText=""` so the typed prefix is dropped), `execute()` delegates to `snipai.trigger(name)`. `register()` resolves cmp via `pcall(require, "cmp")`, is idempotent, returns false when cmp is not installed. |
 | `sources.blink` | blink.cmp source object (phase 5) | same contract, different engine API. |
 
 ### Entry points
@@ -190,7 +190,7 @@ The rule is simple: **arrows point downward in the Layers diagram; never upward.
 | `claude/runner` | `vim.system` (or plenary.job fallback), `claude/parser` | jobs, history, UI |
 | `jobs/*` | `claude/*`, `events`, `snippet`, `notify` | UI, pickers, adapters |
 | `history/*` | filesystem (`vim.fn.stdpath`, `vim.uv`), `events` | UI, pickers, adapters, jobs |
-| `ui/*`, `pickers/*`, `sources/*` | core modules + their own UI dep (Volt / Telescope / cmp) | each other (UI should not require pickers; sources should not require UI) |
+| `ui/*`, `pickers/*`, `sources/*` | core modules + their own runtime dep (`vim.ui` / Telescope / cmp) | each other (UI should not require pickers; sources should not require UI) |
 | `init.lua`, `plugin/snipai.lua` | anything | — |
 
 **Why this matters:** these rules are what make `tests/unit/` dependency-free. A new contributor can run the unit suite on pure-Lua modules (events, params, snippet, parser) in ~5ms with standalone `busted` — no Neovim process to boot.
@@ -210,9 +210,9 @@ nvim-cmp ─► sources/cmp.lua ─► registry.lookup_prefix() ─► list of S
   ▼ user selects "sample_snippet"
 sources/cmp.lua :execute() hook ─► snipai.trigger(snippet, ctx)
   │
-  ▼ does snippet have params?
-  │   yes ─► ui/param_form.lua (Volt popup) ─► values
-  │   no  ─► skip
+  ▼ does snippet have params AND ctx.params was not supplied?
+  │   yes ─► ui/param_form.lua (vim.ui.* chain) ─► resolved values
+  │   no  ─► skip; spawn directly with ctx.params (or {} → defaults)
   ▼
 snippet:render(params)  -> final prompt string
   │
@@ -296,9 +296,9 @@ Everything else (registry, snippet, jobs, history) will work unchanged.
 ### Add a new completion engine (e.g. blink.cmp)
 
 1. Write `lua/snipai/sources/blink.lua` that conforms to blink's source API.
-2. Call `require("snipai").trigger(snippet, ctx)` from the engine's `execute`/`complete` hook.
-3. Register it from `init.lua:setup()` when the engine is available (`pcall(require, "blink.cmp")`).
-4. Copy `tests/integration/cmp_source_spec.lua` → `blink_source_spec.lua` with the blink shape.
+2. Call `require("snipai").trigger(name, ctx)` from the engine's `execute` hook.
+3. Expose a `register(snipai_api?, engine_mod?)` entry point mirroring `sources.cmp`; users call it from their engine config.
+4. Copy `tests/unit/sources/cmp_spec.lua` → `blink_spec.lua` with the blink shape.
 
 No core change.
 
@@ -323,9 +323,7 @@ No core change.
 tests/
 ├── minimal_init.lua                  -- bootstraps plenary + plugin in headless nvim
 ├── helpers/
-│   ├── fixtures.lua                  -- load JSON snippets + stream-json fixtures
-│   ├── fake_runner.lua               -- stub runner that replays fixtures
-│   └── tmpdir.lua                    -- isolated tmp cwd + stdpath("data") per test
+│   └── json.lua                      -- pure-Lua JSON encode/decode for fixture specs
 ├── unit/                             -- pure Lua, no nvim state needed
 │   ├── config_spec.lua
 │   ├── params_spec.lua
@@ -333,34 +331,33 @@ tests/
 │   ├── registry_spec.lua
 │   ├── events_spec.lua
 │   ├── notify_spec.lua
-│   ├── claude/parser_spec.lua
-│   └── history/store_spec.lua
-├── integration/                      -- real nvim APIs + fake runner
-│   ├── jobs_spec.lua
-│   ├── history_spec.lua
-│   └── cmp_source_spec.lua
-├── ui/                               -- smoke tests only
-│   ├── param_form_spec.lua
-│   └── pickers_spec.lua
+│   ├── init_spec.lua
+│   ├── claude/
+│   │   ├── parser_spec.lua
+│   │   └── runner_spec.lua
+│   ├── history/
+│   │   ├── store_spec.lua
+│   │   └── init_spec.lua
+│   ├── jobs/
+│   │   ├── job_spec.lua
+│   │   └── init_spec.lua
+│   ├── ui/
+│   │   ├── popup_spec.lua
+│   │   └── param_form_spec.lua
+│   └── sources/
+│       └── cmp_spec.lua
+├── integration/                      -- real nvim APIs + fake runner (when added)
 └── fixtures/
-    ├── snippets/
-    │   ├── global.json
-    │   └── project.json
     └── claude/
-        ├── success_edit.jsonl
-        ├── success_multi.jsonl
-        ├── failure_permission.jsonl
-        ├── failure_parse.jsonl
-        ├── cancelled.jsonl
-        └── long_running.jsonl
+        └── success_multi.jsonl
 ```
 
 **Principles:**
 
-- **`unit/` is dependency-free.** Use standalone `busted tests/unit/foo_spec.lua` for tight loops.
-- **Fake runner is the linchpin.** `tests/helpers/fake_runner.lua` swaps in via the DI seam in `claude/runner.lua`. It replays real captured `stream-json` fixtures, so every integration test is sub-second and deterministic.
-- **Fixtures are real.** `scripts/record_fixture.sh "<prompt>"` captures a fresh stream from the actual Claude CLI. Do not hand-write fixture events — they will drift from the CLI.
-- **UI tests are smoke only.** Verify "popup opens, values come back correctly" — no pixel assertions.
+- **`unit/` is dependency-free.** Each module exposes injection seams (`opts._deps`, `opts.reader`, `opts.ui_input`, `opts.popup`, ...) so specs run in pure Lua without needing a real cmp / Telescope / vim.ui backend.
+- **Fake runner inside specs.** `tests/unit/init_spec.lua` and `tests/unit/jobs/init_spec.lua` define their own recording runner fakes that implement the `spawn(prompt, opts, on_event, on_exit)` contract and drive exit/event callbacks explicitly — no timing flake.
+- **Fixtures are real.** `success_multi.jsonl` is a captured stream from the actual Claude CLI. Do not hand-write fixture events — they will drift from the CLI.
+- **UI specs are unit-level with injected `vim.ui.*`.** Full-nvim smoke tests can land under `tests/integration/` later; for now the `ui.popup` / `ui.param_form` specs stub the `vim.ui` seam and assert value flow end-to-end.
 
 See `CONTRIBUTING.md` for how to run each tier.
 

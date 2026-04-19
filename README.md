@@ -50,9 +50,9 @@
 | Neovim | **0.10+** | needs `vim.system`, `vim.uv`, `vim.islist` |
 | Claude Code CLI | latest | plugin shells out to `claude -p ... --output-format stream-json` |
 | `hrsh7th/nvim-cmp` | recent | completion source (required until `v0.2.0` adds blink.cmp) |
-| `nvim-telescope/telescope.nvim` | recent | pickers for running + history |
-| `nvchad/volt` | recent | popup UI for parameter form + history detail |
+| `nvim-telescope/telescope.nvim` | recent | pickers for running + history (from `v0.1.0`) |
 | `rcarriga/nvim-notify` *or* `j-hui/fidget.nvim` | optional | nicer progress notifications; falls back to `vim.notify` |
+| `stevearc/dressing.nvim`, `folke/snacks.nvim`, or `nvim-telescope/telescope-ui-select.nvim` | optional | upgrades the `vim.ui.input` / `vim.ui.select` parameter prompts to popup-style widgets; stock `vim.ui.*` works without them |
 
 Verify Claude Code is available:
 
@@ -71,13 +71,12 @@ claude --version
   "louishuyng/snipai",
   dependencies = {
     "hrsh7th/nvim-cmp",
-    "nvim-telescope/telescope.nvim",
-    "nvchad/volt",
     "rcarriga/nvim-notify", -- optional
   },
   event = "InsertEnter",
   config = function()
     require("snipai").setup()
+    require("snipai.sources.cmp").register()
   end,
 }
 ```
@@ -89,11 +88,12 @@ use({
   "louishuyng/snipai",
   requires = {
     "hrsh7th/nvim-cmp",
-    "nvim-telescope/telescope.nvim",
-    "nvchad/volt",
     { "rcarriga/nvim-notify", opt = true },
   },
-  config = function() require("snipai").setup() end,
+  config = function()
+    require("snipai").setup()
+    require("snipai.sources.cmp").register()
+  end,
 })
 ```
 
@@ -101,13 +101,29 @@ use({
 
 ```vim
 Plug 'hrsh7th/nvim-cmp'
-Plug 'nvim-telescope/telescope.nvim'
-Plug 'nvchad/volt'
 Plug 'rcarriga/nvim-notify'
 Plug 'louishuyng/snipai'
 
-lua require('snipai').setup()
+lua << EOF
+require('snipai').setup()
+require('snipai.sources.cmp').register()
+EOF
 ```
+
+After registering the source, add it to your `nvim-cmp` source list:
+
+```lua
+local cmp = require("cmp")
+cmp.setup({
+  sources = cmp.config.sources({
+    { name = "snipai" },
+    { name = "nvim_lsp" },
+    { name = "buffer" },
+  }),
+})
+```
+
+`register()` is a no-op when nvim-cmp is not installed, so the call is safe to leave in place even on machines where cmp is absent.
 
 After install, run `:checkhealth snipai` (planned for `v0.1.0`) to verify everything is wired up.
 
@@ -139,9 +155,18 @@ After install, run `:checkhealth snipai` (planned for `v0.1.0`) to verify everyt
 }
 ```
 
-**3. Trigger it.** Open any buffer, type `aits` — the snippet shows up in `nvim-cmp` with an AI icon. Hit `<CR>`, fill the popup, submit. Claude Code runs in the background and you keep editing.
+**3. Register the cmp source** — the install snippets above already do this; confirm the call is there:
 
-**4. Check history.** `<leader>sh` opens the project's history picker. Press `<C-q>` on any entry to put its file changes in the quickfix list.
+```lua
+require("snipai").setup()
+require("snipai.sources.cmp").register()
+```
+
+and that your `nvim-cmp` config includes `{ name = "snipai" }` in its `sources` list.
+
+**4. Trigger it.** Open any buffer, type `aits` — the snippet shows up in `nvim-cmp` with an `[AI]` menu tag. Hit `<CR>`, answer each parameter prompt (via `vim.ui.input` / `vim.ui.select`, or your popup backend of choice), and Claude Code runs in the background while you keep editing.
+
+**5. Check history.** `<leader>sh` opens the project's history picker (from `v0.1.0`). Press `<C-q>` on any entry to put its file changes in the quickfix list.
 
 ---
 

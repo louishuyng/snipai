@@ -2,7 +2,7 @@
 
 > AI-powered snippets for Neovim, backed by Claude Code.
 
-`snipai` turns your snippet library into an AI agent. Type a prefix, pick a snippet from `nvim-cmp`, fill in any declared parameters, and let Claude Code do the work — edit files, run tests, anything Claude Code can do from the CLI — while you keep editing. History is kept per-project; file changes from any past run can be dropped into the quickfix list in one keystroke.
+`snipai` turns your snippet library into an AI agent. Type a prefix, pick from `nvim-cmp`, fill the parameters, and Claude Code does the rest — edit files, run tests, anything the CLI can do — while you keep editing. Every run is logged per-project; any past run's file changes drop into the quickfix list with one keystroke.
 
 ![status](https://img.shields.io/badge/status-alpha-orange) ![neovim](https://img.shields.io/badge/Neovim-0.10%2B-57A143?logo=neovim) ![license](https://img.shields.io/badge/license-MIT-blue)
 
@@ -30,17 +30,18 @@
 
 ## Features
 
-- **Snippet-as-prompt.** Declare snippets in JSON with a `body` template and typed parameters. The body becomes the prompt sent to Claude Code.
-- **Parameters with real types.** `string`, `text` (multiline), `select` (with options), `boolean`. Validation is enforced before a snippet runs.
-- **Global + per-project snippet libraries.** Project `.snipai.json` overrides global snippets by name.
-- **Concurrent runs.** Multiple snippets can execute at the same time; each has its own state and its own notification.
-- **Per-project history, persisted.** Every run is written to a JSONL log, segmented by workspace. Survives Neovim restarts.
-- **Streaming progress.** Progress is parsed from Claude Code's `stream-json` output, so the notification updates as real tool uses happen — no scraping.
-- **Quickfix integration.** Send any past run's file changes to the quickfix list with one keystroke.
-- **Two completion engines.** Ships as a `nvim-cmp` source (phase 1); `blink.cmp` adapter planned for `v0.2.0`.
-- **Telescope pickers** for both active jobs and full history.
-- **Notification backend auto-detect** — `nvim-notify`, `fidget.nvim`, or stock `vim.notify`.
-- **Zero-config.** `require("snipai").setup()` and start typing.
+- **Snippet-as-prompt.** JSON snippets with a `body` template + typed parameters; the body becomes the Claude prompt.
+- **Typed parameters.** `string`, `text`, `select`, `boolean` — validated before the run.
+- **Global + per-project libraries.** Project `.snipai.json` overrides global snippets by name.
+- **Filetype scoping.** Optional `filetype` field keeps language-specific snippets out of other buffers.
+- **Concurrent runs** with per-job notifications and spinner.
+- **Persistent history.** JSONL log per project, survives restarts.
+- **Streaming progress.** Parsed from Claude's `stream-json` output — no scraping.
+- **Quickfix integration** for any past run's file changes.
+- **Completion via nvim-cmp**; blink.cmp adapter on the roadmap.
+- **Telescope pickers** for active jobs and history.
+- **Notification auto-detect** (`nvim-notify` / `fidget.nvim` / `vim.notify`).
+- **Zero-config.** `require("snipai").setup()` and go.
 
 ---
 
@@ -48,18 +49,14 @@
 
 | Requirement | Version | Why |
 |---|---|---|
-| Neovim | **0.10+** | needs `vim.system`, `vim.uv`, `vim.islist` |
-| Claude Code CLI | latest | plugin shells out to `claude -p ... --output-format stream-json` |
-| `hrsh7th/nvim-cmp` | recent | completion source (required until `v0.2.0` adds blink.cmp) |
-| `nvim-telescope/telescope.nvim` | recent | pickers for running + history (from `v0.1.0`) |
-| `rcarriga/nvim-notify` *or* `j-hui/fidget.nvim` | optional | nicer progress notifications; falls back to `vim.notify` |
-| `stevearc/dressing.nvim`, `folke/snacks.nvim`, or `nvim-telescope/telescope-ui-select.nvim` | optional | upgrades the `vim.ui.input` / `vim.ui.select` parameter prompts to popup-style widgets; stock `vim.ui.*` works without them |
+| Neovim | **0.10+** | `vim.system`, `vim.uv`, `vim.islist` |
+| Claude Code CLI | latest | the plugin shells out to `claude -p` |
+| `hrsh7th/nvim-cmp` | recent | completion source |
+| `nvim-telescope/telescope.nvim` | recent | pickers for running jobs + history |
+| `rcarriga/nvim-notify` *or* `j-hui/fidget.nvim` | optional | richer progress toasts; falls back to `vim.notify` |
+| `stevearc/dressing.nvim` / `folke/snacks.nvim` / `nvim-telescope/telescope-ui-select.nvim` | optional | popup-style prompts on top of `vim.ui.input` / `select` |
 
-Verify Claude Code is available:
-
-```bash
-claude --version
-```
+Verify the CLI: `claude --version`.
 
 ---
 
@@ -111,12 +108,11 @@ require('snipai.sources.cmp').register()
 EOF
 ```
 
-After registering the source, add it to your `nvim-cmp` source list:
+Then add the source to your cmp config:
 
 ```lua
-local cmp = require("cmp")
-cmp.setup({
-  sources = cmp.config.sources({
+require("cmp").setup({
+  sources = require("cmp").config.sources({
     { name = "snipai" },
     { name = "nvim_lsp" },
     { name = "buffer" },
@@ -124,9 +120,7 @@ cmp.setup({
 })
 ```
 
-`register()` is a no-op when nvim-cmp is not installed, so the call is safe to leave in place even on machines where cmp is absent.
-
-After install, run `:checkhealth snipai` (planned for `v0.1.0`) to verify everything is wired up.
+`register()` is a no-op when cmp isn't installed, so leaving the call in place on a cmp-less machine is harmless.
 
 ---
 
@@ -156,18 +150,11 @@ After install, run `:checkhealth snipai` (planned for `v0.1.0`) to verify everyt
 }
 ```
 
-**3. Register the cmp source** — the install snippets above already do this; confirm the call is there:
+**3. Confirm the cmp source is wired** — the install recipes already call `require("snipai.sources.cmp").register()` and add `{ name = "snipai" }` to cmp's sources.
 
-```lua
-require("snipai").setup()
-require("snipai.sources.cmp").register()
-```
+**4. Trigger it.** Type `aits` in any buffer, pick it from cmp (look for the `[AI]` tag), answer the parameter prompts, and Claude runs in the background while you keep editing.
 
-and that your `nvim-cmp` config includes `{ name = "snipai" }` in its `sources` list.
-
-**4. Trigger it.** Open any buffer, type `aits` — the snippet shows up in `nvim-cmp` with an `[AI]` menu tag. Hit `<CR>`, answer each parameter prompt (via `vim.ui.input` / `vim.ui.select`, or your popup backend of choice), and Claude Code runs in the background while you keep editing.
-
-**5. Check history.** `<leader>sh` opens the project's history picker (from `v0.1.0`). Press `<C-q>` on any entry to put its file changes in the quickfix list.
+**5. Check history.** `<leader>sh` opens the project's history picker. `<C-q>` on any entry sends its file changes to the quickfix list.
 
 ---
 
@@ -194,32 +181,25 @@ and that your `nvim-cmp` config includes `{ name = "snipai" }` in its `sources` 
 }
 ```
 
-**`insert` templates:**
+**`insert` templates.** With `insert` set, the rendered template drops at the cursor (replacing the typed prefix), the buffer auto-saves, and Claude enriches the file in place. When the run finishes, touched buffers reload via `:checktime`. Snippets without `insert` skip the buffer entirely — Claude just runs with the rendered `body` as its prompt. Unnamed scratch buffers are refused up front (no file on disk to enrich).
 
-When `insert` is set, picking the snippet from cmp drops the rendered template at the cursor in place of the typed prefix, silently `:writes` the buffer, then kicks off the Claude run. Claude sees the on-disk file already has your scaffold and enriches it with `Edit` / `MultiEdit` — when the job finishes, open buffers pointing at touched files reload automatically via `:checktime`. Snippets without `insert` do not touch the buffer or auto-save; Claude just runs with the rendered `body` as its prompt.
-
-Requirements for insert-flavored snippets: the buffer must be saved to a real file on disk — unnamed scratch buffers are refused up front with an error notification, since there is nothing for Claude to enrich.
-
-**Built-in parameters:**
-
-The following names are reserved and auto-populated by the plugin at trigger time. Reference them in `{{placeholders}}` inside `insert` or `body`; **do not** declare them in `parameter` (validation will skip the snippet with a `"reserved built-in name"` error).
+**Built-in parameters.** Reference these in `{{placeholders}}`; do **not** declare them in `parameter` (validation rejects the snippet if you do).
 
 | Name | Value |
 |---|---|
-| `cursor_file` | absolute path of the buffer, or empty on unnamed scratch buffers |
-| `cursor_line` | 1-based line under the cursor at trigger time |
-| `cursor_col` | 1-based column under the cursor at trigger time |
-| `cwd` | `vim.fn.getcwd()` of the window that triggered the snippet |
+| `cursor_file` | absolute path of the buffer, empty on unnamed scratch |
+| `cursor_line` / `cursor_col` | 1-based position at trigger time |
+| `cwd` | `vim.fn.getcwd()` |
 
-**`filetype` scoping:**
+**`filetype` scoping.**
 
 | Shape | Meaning |
 |---|---|
-| *(omitted)* | available in every buffer (default) |
-| `"lua"` | offered only when `vim.bo.filetype == "lua"` |
-| `["lua", "luau"]` | offered when the buffer filetype matches any entry |
+| *(omitted)* | available in every buffer |
+| `"lua"` | only when `vim.bo.filetype == "lua"` |
+| `["lua", "luau"]` | any-of |
 
-The filter is applied at the cmp source: non-matching snippets are silently dropped from the completion list, so a Markdown-scoped prompt never pollutes a TypeScript buffer.
+Non-matching snippets are dropped from cmp — Markdown-scoped prompts don't pollute TypeScript buffers.
 
 **Parameter type reference:**
 
@@ -307,21 +287,12 @@ require("snipai").setup({
 
   claude = {
     cmd        = "claude",
-    -- Two defaults worth knowing about:
-    --   * --permission-mode acceptEdits — auto-accepts Edit/Write/MultiEdit
-    --     in non-interactive mode (without it, `claude -p` silently
-    --     skips file writes).
-    --   * --setting-sources "" — loads no settings sources for the
-    --     invocation, which suppresses user-installed Claude Code
-    --     plugins (superpowers, etc.) and their SessionStart hooks for
-    --     this one run. Real speedup (~2–3× on typical workloads)
-    --     because the plugin bootstrap injects 12k+ tokens of context
-    --     into every non-interactive session. Keychain auth, memory,
-    --     CLAUDE.md discovery, and MCP servers are unaffected.
-    -- This field is a nested array, so your value REPLACES the default
-    -- outright — pass the full list you want claude to see.
+    -- acceptEdits: auto-accept Edit/Write/MultiEdit (required for -p).
+    -- --setting-sources "": skip plugin bootstrap (~2–3× faster; keeps
+    -- keychain auth, memory, CLAUDE.md, and MCP servers working).
+    -- extra_args is a nested array — your value REPLACES this default.
     extra_args = { "--permission-mode", "acceptEdits", "--setting-sources", "" },
-    timeout_ms = 5 * 60 * 1000, -- 5 min per run
+    timeout_ms = 5 * 60 * 1000,
   },
 
   ui = {
@@ -363,7 +334,9 @@ require("snipai").setup({
 
 ## Statusline integration
 
-`require("snipai.statusline").status(bufnr?)` returns an animated indicator string you can drop straight into a statusline. Empty (`""`) when nothing relevant is in flight; a braille-spinner frame + `" snipai"` (e.g. `⠋ snipai`) when one of the currently-running jobs either was triggered from the buffer's file or has already emitted an `Edit` / `Write` / `MultiEdit` for it. A background `uv` timer advances the spinner frame every 100ms and calls `:redrawstatus` — it only runs while at least one job is active, so there is zero cost when the plugin is idle. Guards against being called before `setup()`, against invalid bufnrs, and against unnamed scratch buffers, so it is cheap to call on every redraw.
+`require("snipai.statusline").status(bufnr?)` returns an animated indicator for dropping into a statusline. Empty when idle; a braille spinner frame + `" snipai"` (e.g. `⠋ snipai`) when a running job was triggered from the buffer's file or has already edited it.
+
+A 100ms uv timer animates the spinner only while at least one job is active — zero cost when idle. Safe to call on every redraw (guards for before-setup, invalid bufnrs, scratch buffers).
 
 ```lua
 -- native statusline
@@ -386,13 +359,13 @@ local function snipai()
 end
 ```
 
-For richer state (active job count, per-job progress, last exit status) subscribe directly to the event bus described below — `snipai.statusline` is deliberately minimal and stays a drop-in string.
+For richer state (active job count, per-job progress, last exit status), subscribe to the event bus below — `snipai.statusline` stays deliberately minimal.
 
 ---
 
 ## Events
 
-`snipai` exposes an internal event bus you can subscribe to. Useful for statusline widgets, custom logging, or integrating with other plugins.
+Internal event bus for statusline widgets, custom logging, or cross-plugin integration.
 
 ```lua
 local bus = require("snipai.events")
@@ -435,36 +408,36 @@ See `:help snipai-troubleshooting` for more.
 
 ## FAQ
 
-**Why not just use the Anthropic API directly?**
-Because most useful snippets need to *edit files* (and run tests, and read context) — not just return a blob of text. The Claude Code CLI gives us that tool loop for free, plus the user's existing auth and model selection. A direct API backend is planned for text-only snippets (see the roadmap).
+**Why not use the Anthropic API directly?**
+Most useful snippets need to *edit files* — not just return text. The Claude Code CLI gives us that tool loop plus your existing auth. A direct-API backend for text-only snippets is on the roadmap.
 
-**Does this replace LuaSnip / similar?**
-No. `snipai` is for AI-backed snippets — ones that spawn a Claude Code run. Regular text-expansion snippets should stay in LuaSnip. Both can coexist happily in `nvim-cmp`.
+**Does this replace LuaSnip?**
+No. `snipai` is for AI-backed snippets; regular text-expansion stays in LuaSnip. Both coexist in cmp.
 
-**Is the JSON format a Microsoft-style snippet file?**
-It's inspired by the shape (a dict of named snippets with `prefix` and `body`), but extended with typed `parameter` definitions and an AI-specific body template. Existing VSCode snippets won't drop in verbatim.
+**Is the JSON format VSCode-compatible?**
+Inspired by it (dict of named snippets with `prefix` + `body`), extended with typed `parameter` definitions. Existing VSCode snippets won't drop in verbatim.
 
-**What does `snipai` send to Anthropic?**
-Only the rendered `body` of the snippet you triggered, plus whatever Claude Code itself decides to read. The plugin never exfiltrates your full buffer or project — but the `claude` subprocess can, exactly like running it from the terminal. Inspect `:SnipaiDetail <id>` to see the exact prompt.
+**What gets sent to Anthropic?**
+The rendered `body`, plus whatever Claude Code itself decides to read. The plugin never exfiltrates your buffer or project — but the `claude` subprocess can, same as running it from the terminal. Use `:SnipaiDetail <id>` to inspect the exact prompt.
 
 ---
 
 ## Roadmap
 
-See [`CHANGELOG.md`](./CHANGELOG.md) for per-version plans. High-level themes beyond `v0.2.0`:
+See [`CHANGELOG.md`](./CHANGELOG.md) for per-version plans. Future themes:
 
-- Snippet authoring: Lua-config entry point, filetype scoping, snippet groups.
-- UX: diff view before accepting, dry-run, token/cost meter, inline ghost-text preview.
-- Backends: Anthropic API direct backend, per-snippet backend selection.
-- Integrations: fzf-lua / snacks.nvim pickers, Trouble.nvim, which-key registration.
-- Collaboration: shared team snippet repos, snippet import/export.
-- Safety: per-snippet tool allowlist, destructive-op confirmation gate.
+- **Authoring:** Lua-config entry point, snippet groups.
+- **UX:** diff view before accept, dry-run, token/cost meter, ghost-text preview.
+- **Backends:** direct Anthropic API, per-snippet backend selection.
+- **Integrations:** fzf-lua / snacks.nvim pickers, Trouble.nvim, which-key.
+- **Collaboration:** shared team snippet repos, import/export.
+- **Safety:** per-snippet tool allowlist, destructive-op confirmation.
 
 ---
 
 ## Contributing
 
-Bug reports, snippet-library PRs, and backend adapters all welcome. See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the dev workflow and test conventions.
+Bug reports, snippet-library PRs, and backend adapters welcome. See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for workflow and test conventions.
 
 ```bash
 git clone https://github.com/louishuyng/snipai

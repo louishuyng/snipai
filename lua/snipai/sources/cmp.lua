@@ -34,10 +34,15 @@ local function snippet_detail(snippet)
 end
 
 local function to_item(snippet)
+  -- insertText is the prefix itself (not "") so the typed characters
+  -- stay on screen while the user fills the param form. trigger()
+  -- swaps this range for the rendered `insert` template on submit,
+  -- so there is no visible flicker between "pick from cmp" and
+  -- "template appears".
   return {
     label = snippet.name,
     filterText = snippet.prefix,
-    insertText = "",
+    insertText = snippet.prefix,
     kind = KIND_SNIPPET,
     detail = snippet_detail(snippet),
     menu = MENU_LABEL,
@@ -122,15 +127,50 @@ function Source:complete(params, callback)
   callback({ items = items, isIncomplete = false })
 end
 
+-- Build the ctx handed to snipai.trigger(): captures the buffer and the
+-- range cmp just wrote, so trigger() can atomically swap `ailua` (the
+-- typed prefix, just re-inserted by cmp) for the rendered `insert`
+-- template once the param form submits.
+local function build_trigger_ctx(snippet_name, registry)
+  if not (vim and vim.api) then
+    return {}
+  end
+  local buffer = vim.api.nvim_get_current_buf()
+  local cursor = vim.api.nvim_win_get_cursor(0)
+  local snippet
+  if registry and type(registry.get) == "function" then
+    snippet = registry:get(snippet_name)
+  end
+  if not snippet then
+    return { buffer = buffer }
+  end
+  local prefix_len = #snippet.prefix
+  local end_col = cursor[2]
+  local start_col = math.max(end_col - prefix_len, 0)
+  return {
+    buffer = buffer,
+    replace_range = {
+      start = { row = cursor[1] - 1, col = start_col },
+      ["end"] = { row = cursor[1] - 1, col = end_col },
+    },
+  }
+end
+
 function Source:execute(completion_item, callback)
   local name = completion_item and completion_item.data and completion_item.data.snippet_name
   if name and type(self._snipai.trigger) == "function" then
-    self._snipai.trigger(name)
+    local registry = self._snipai._state and self._snipai._state.registry
+    local ctx = build_trigger_ctx(name, registry)
+    self._snipai.trigger(name, ctx)
   end
   if callback then
     callback(completion_item)
   end
 end
+
+-- Exposed for tests that want to verify ctx-building without a real
+-- cmp/nvim buffer. See tests/unit/sources/cmp_spec.lua.
+M._build_trigger_ctx = build_trigger_ctx
 
 -- ---------------------------------------------------------------------------
 -- Registration

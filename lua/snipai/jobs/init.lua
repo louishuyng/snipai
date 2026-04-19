@@ -42,7 +42,8 @@ end
 
 function Manager:spawn(snippet, params, ctx)
   assert(type(snippet) == "table", "spawn requires a snippet object")
-  local prompt, render_err = snippet:render(params or {})
+  local builtins = ctx and ctx.builtins
+  local prompt, render_err = snippet:render(params or {}, builtins)
   if prompt == nil then
     return nil, render_err
   end

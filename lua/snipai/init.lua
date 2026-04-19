@@ -21,8 +21,8 @@
 --
 -- Testing: pass opts._deps to inject any or all of { env, events,
 -- notify, history, registry, jobs, runner, reader, json_decode,
--- param_form }. Not part of the public API; leading underscore
--- signals internal.
+-- param_form, gather_builtins, place_insert, save_buffer }. Not part
+-- of the public API; leading underscore signals internal.
 
 local config = require("snipai.config")
 local events_mod = require("snipai.events")
@@ -31,6 +31,38 @@ local history_mod = require("snipai.history")
 local registry_mod = require("snipai.registry")
 local jobs_mod = require("snipai.jobs")
 local param_form_mod = require("snipai.ui.param_form")
+
+-- ---------------------------------------------------------------------------
+-- Built-in context + buffer helpers (injectable via _deps for tests)
+-- ---------------------------------------------------------------------------
+
+local function default_gather_builtins()
+  local cursor = vim.api.nvim_win_get_cursor(0)
+  return {
+    cursor_file = vim.api.nvim_buf_get_name(0),
+    cursor_line = cursor[1],
+    cursor_col = cursor[2] + 1,
+    cwd = vim.fn.getcwd(),
+  }
+end
+
+local function default_place_insert(buffer, range, text)
+  local lines = vim.split(text, "\n", { plain = true })
+  vim.api.nvim_buf_set_text(
+    buffer,
+    range.start.row,
+    range.start.col,
+    range["end"].row,
+    range["end"].col,
+    lines
+  )
+end
+
+local function default_save_buffer(buffer)
+  vim.api.nvim_buf_call(buffer, function()
+    vim.cmd("silent write")
+  end)
+end
 
 local M = {}
 
@@ -46,6 +78,9 @@ local state = {
   registry = nil,
   jobs = nil,
   param_form = nil,
+  gather_builtins = nil,
+  place_insert = nil,
+  save_buffer = nil,
   _initialized = false,
 }
 
@@ -105,6 +140,9 @@ function M.setup(opts)
   state.registry = registry
   state.jobs = jobs
   state.param_form = deps.param_form or param_form_mod
+  state.gather_builtins = deps.gather_builtins or default_gather_builtins
+  state.place_insert = deps.place_insert or default_place_insert
+  state.save_buffer = deps.save_buffer or default_save_buffer
   state._initialized = true
 
   return M
@@ -132,6 +170,58 @@ local function snippet_has_params(snippet)
   return next(snippet.parameter or {}) ~= nil
 end
 
+-- When the snippet declares an `insert`, we need an on-disk file for
+-- Claude to enrich; refuse up front on unnamed scratch buffers rather
+-- than placing the template and then erroring at save time.
+local function refuse_if_no_file(snippet, builtins)
+  if snippet.insert == nil then
+    return true
+  end
+  local path = builtins and builtins.cursor_file
+  if path == nil or path == "" then
+    return false, "save the buffer to disk first; snippet insert needs a file to enrich"
+  end
+  return true
+end
+
+-- Render + place the template at the cmp-captured range (falls back to
+-- the current cursor for programmatic triggers), then silently write
+-- the buffer. Returns (ok, err); on error nothing is spawned.
+local function apply_insert(snippet, values, ctx)
+  if snippet.insert == nil then
+    return true
+  end
+  local text, render_err = snippet:render_insert(values, ctx.builtins)
+  if text == nil then
+    return false, tostring(render_err)
+  end
+  if ctx.buffer == nil then
+    -- Headless / programmatic caller without buffer context — nothing
+    -- to write into. Skip placement; body still runs as usual.
+    return true
+  end
+  local range = ctx.replace_range
+  if range == nil then
+    local cursor = (ctx.builtins and ctx.builtins.cursor_line) and {
+      row = ctx.builtins.cursor_line - 1,
+      col = (ctx.builtins.cursor_col or 1) - 1,
+    } or { row = 0, col = 0 }
+    range = { start = cursor, ["end"] = cursor }
+  end
+  state.place_insert(ctx.buffer, range, text)
+  state.save_buffer(ctx.buffer)
+  return true
+end
+
+local function spawn_with_insert(snippet, values, ctx)
+  local ok, err = apply_insert(snippet, values, ctx)
+  if not ok then
+    state.notify:notify("snipai: " .. err, "error")
+    return nil, err
+  end
+  return state.jobs:spawn(snippet, values, ctx)
+end
+
 function M.trigger(name_or_snippet, ctx)
   ensure_initialized()
   ctx = ctx or {}
@@ -141,18 +231,32 @@ function M.trigger(name_or_snippet, ctx)
     return nil, err
   end
 
-  if ctx.params ~= nil or not snippet_has_params(snippet) then
-    return state.jobs:spawn(snippet, ctx.params or {}, ctx)
+  -- Gather built-ins once, at trigger time, so cursor_file / line /
+  -- col reflect where the user was when they picked the snippet — not
+  -- where they end up after the param form steals focus.
+  if ctx.builtins == nil then
+    ctx.builtins = state.gather_builtins()
   end
 
-  -- Form-driven path. If the form backend submits synchronously (tests,
-  -- sequential vim.ui.input chains) we can still return the spawned job
-  -- to the caller; an async popup backend leaves the return value nil.
+  local ok, refuse_err = refuse_if_no_file(snippet, ctx.builtins)
+  if not ok then
+    state.notify:notify("snipai: " .. refuse_err, "error")
+    return nil, refuse_err
+  end
+
+  if ctx.params ~= nil or not snippet_has_params(snippet) then
+    return spawn_with_insert(snippet, ctx.params or {}, ctx)
+  end
+
+  -- Form-driven path. A synchronous form backend (tests, sequential
+  -- vim.ui.input chain) still lets us return the spawned job; async
+  -- popup backends leave the return value nil and callers can rely
+  -- on the job_started event.
   local spawned_job, spawn_err
   state.param_form.open(snippet, {
     notify = state.notify,
     on_submit = function(values)
-      spawned_job, spawn_err = state.jobs:spawn(snippet, values, ctx)
+      spawned_job, spawn_err = spawn_with_insert(snippet, values, ctx)
     end,
     on_cancel = function() end,
   })
@@ -231,6 +335,9 @@ function M._reset()
   state.registry = nil
   state.jobs = nil
   state.param_form = nil
+  state.gather_builtins = nil
+  state.place_insert = nil
+  state.save_buffer = nil
   state._initialized = false
 end
 

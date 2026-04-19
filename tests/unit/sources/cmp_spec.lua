@@ -30,6 +30,9 @@ local function make_registry(snippets_by_name)
       end
       return out
     end,
+    get = function(_, name)
+      return snippets_by_name[name]
+    end,
   }
 end
 
@@ -72,7 +75,10 @@ describe("snipai.sources.cmp", function()
       })
       assert.equals("sample", item.label)
       assert.equals("sa", item.filterText)
-      assert.equals("", item.insertText)
+      -- insertText re-inserts the typed prefix itself so the buffer
+      -- stays visually stable until trigger() swaps it for the
+      -- rendered template; see _build_trigger_ctx below.
+      assert.equals("sa", item.insertText)
       assert.equals(15, item.kind)
       assert.equals("[AI]", item.menu)
       assert.equals("sample desc", item.detail)
@@ -304,6 +310,59 @@ describe("snipai.sources.cmp", function()
         s:execute({ data = { snippet_name = "sample" } }, nil)
       end)
       assert.equals(1, #fake._trigger_calls)
+    end)
+  end)
+
+  describe("_build_trigger_ctx", function()
+    local snippet_mod = require("snipai.snippet")
+    local function make_snip(raw)
+      return snippet_mod.new(raw.name, raw)
+    end
+
+    it("captures the buffer + the range covering the typed prefix", function()
+      local buf = vim.api.nvim_create_buf(false, true)
+      -- Trailing space keeps col 9 a valid normal-mode cursor position
+      -- (nvim clamps past-last-char in normal mode, which would otherwise
+      -- leave us one col short of the intended "cmp-just-confirmed" state).
+      vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "foo ailua bar" })
+      vim.api.nvim_set_current_buf(buf)
+      vim.api.nvim_win_set_cursor(0, { 1, 9 }) -- just past "ailua"
+      local registry = make_registry({
+        ailua_module = make_snip({
+          name = "ailua_module",
+          prefix = "ailua",
+          body = "b",
+        }),
+      })
+
+      local ctx = cmp_source._build_trigger_ctx("ailua_module", registry)
+
+      assert.equals(buf, ctx.buffer)
+      assert.truthy(ctx.replace_range)
+      assert.equals(0, ctx.replace_range.start.row)
+      assert.equals(4, ctx.replace_range.start.col)
+      assert.equals(0, ctx.replace_range["end"].row)
+      assert.equals(9, ctx.replace_range["end"].col)
+
+      vim.api.nvim_buf_delete(buf, { force = true })
+    end)
+
+    it("returns just buffer when the snippet is missing from the registry", function()
+      local buf = vim.api.nvim_create_buf(false, true)
+      vim.api.nvim_set_current_buf(buf)
+      local ctx = cmp_source._build_trigger_ctx("missing", make_registry({}))
+      assert.equals(buf, ctx.buffer)
+      assert.is_nil(ctx.replace_range)
+      vim.api.nvim_buf_delete(buf, { force = true })
+    end)
+
+    it("tolerates a registry without a get method (defensive)", function()
+      local buf = vim.api.nvim_create_buf(false, true)
+      vim.api.nvim_set_current_buf(buf)
+      local ctx = cmp_source._build_trigger_ctx("x", { lookup_prefix = function() end })
+      assert.equals(buf, ctx.buffer)
+      assert.is_nil(ctx.replace_range)
+      vim.api.nvim_buf_delete(buf, { force = true })
     end)
   end)
 

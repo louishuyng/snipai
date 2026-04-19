@@ -91,6 +91,18 @@ local function auto_submit_form()
   }
 end
 
+-- Headless-safe built-ins: concrete non-empty cursor_file so insert-
+-- flavored snippets don't trip the unnamed-buffer refusal, but tests
+-- that care about the value can override via overrides.gather_builtins.
+local function default_test_builtins()
+  return {
+    cursor_file = "/test/x.lua",
+    cursor_line = 1,
+    cursor_col = 1,
+    cwd = "/test",
+  }
+end
+
 -- Builds a setup() args table wired entirely with fakes.
 local function build_test_setup(overrides)
   overrides = overrides or {}
@@ -121,6 +133,9 @@ local function build_test_setup(overrides)
     history = history,
     runner = runner,
     param_form = param_form,
+    gather_builtins = overrides.gather_builtins or default_test_builtins,
+    place_insert = overrides.place_insert or function() end,
+    save_buffer = overrides.save_buffer or function() end,
     reader = overrides.reader,
     json_decode = overrides.json_decode or json.decode,
   }
@@ -153,6 +168,12 @@ local FIXTURE_CONFIG_JSON = json.encode({
   no_params = {
     prefix = "np",
     body = "do the thing",
+  },
+  ailua_module = {
+    prefix = "ailua",
+    body = "enrich {{cursor_file}}:{{cursor_line}} — {{purpose}}",
+    insert = "-- purpose: {{purpose}}\n",
+    parameter = { purpose = { type = "text", default = "stub" } },
   },
 })
 
@@ -313,6 +334,125 @@ describe("snipai (top-level)", function()
       assert.is_nil(job)
       assert.is_nil(err)
       assert.equals(0, #deps.runner.spawns)
+    end)
+  end)
+
+  describe("trigger with insert-flavored snippet", function()
+    it("places rendered insert, saves the buffer, spawns with builtins in prompt", function()
+      local place_calls, save_calls = {}, {}
+      local range = {
+        start = { row = 2, col = 0 },
+        ["end"] = { row = 2, col = 5 },
+      }
+      local deps = setup_with_fixture({
+        gather_builtins = function()
+          return {
+            cursor_file = "/proj/a.lua",
+            cursor_line = 3,
+            cursor_col = 2,
+            cwd = "/proj",
+          }
+        end,
+        place_insert = function(buffer, r, text)
+          place_calls[#place_calls + 1] = { buffer = buffer, range = r, text = text }
+        end,
+        save_buffer = function(buffer)
+          save_calls[#save_calls + 1] = buffer
+        end,
+      })
+
+      local job = snipai.trigger("ailua_module", {
+        params = { purpose = "logging" },
+        buffer = 7,
+        replace_range = range,
+      })
+
+      assert.truthy(job)
+      assert.equals(1, #place_calls)
+      assert.equals(7, place_calls[1].buffer)
+      assert.are.same(range, place_calls[1].range)
+      assert.equals("-- purpose: logging\n", place_calls[1].text)
+      assert.equals(1, #save_calls)
+      assert.equals(7, save_calls[1])
+      -- body rendered against user params + builtins
+      assert.equals("enrich /proj/a.lua:3 — logging", deps.runner.spawns[1].prompt)
+    end)
+
+    it("refuses on unnamed buffer (cursor_file is empty) and skips spawn", function()
+      local place_calls, save_calls = {}, {}
+      local deps = setup_with_fixture({
+        gather_builtins = function()
+          return {
+            cursor_file = "",
+            cursor_line = 1,
+            cursor_col = 1,
+            cwd = "/nowhere",
+          }
+        end,
+        place_insert = function()
+          place_calls[#place_calls + 1] = true
+        end,
+        save_buffer = function()
+          save_calls[#save_calls + 1] = true
+        end,
+      })
+
+      local job, err = snipai.trigger("ailua_module", { params = { purpose = "x" } })
+
+      assert.is_nil(job)
+      assert.truthy(err)
+      assert.equals(0, #place_calls)
+      assert.equals(0, #save_calls)
+      assert.equals(0, #deps.runner.spawns)
+      local last = deps.notify_calls[#deps.notify_calls]
+      assert.matches("save", last.msg)
+      assert.equals(4, last.level) -- error
+    end)
+
+    it("does not touch the buffer when the snippet has no insert field", function()
+      local place_calls, save_calls = {}, {}
+      local deps = setup_with_fixture({
+        place_insert = function()
+          place_calls[#place_calls + 1] = true
+        end,
+        save_buffer = function()
+          save_calls[#save_calls + 1] = true
+        end,
+      })
+
+      snipai.trigger("no_params")
+
+      assert.equals(0, #place_calls)
+      assert.equals(0, #save_calls)
+      assert.equals(1, #deps.runner.spawns)
+    end)
+
+    it("falls back to a cursor-at-point range when the caller didn't supply one", function()
+      local captured
+      setup_with_fixture({
+        gather_builtins = function()
+          return {
+            cursor_file = "/proj/a.lua",
+            cursor_line = 5,
+            cursor_col = 3,
+            cwd = "/proj",
+          }
+        end,
+        place_insert = function(buffer, r, text)
+          captured = { buffer = buffer, range = r, text = text }
+        end,
+      })
+
+      snipai.trigger("ailua_module", { params = { purpose = "x" }, buffer = 9 })
+
+      -- Range collapses to the cursor point (start == end) when no
+      -- replace_range was supplied — programmatic triggers just insert
+      -- at the cursor rather than replacing a typed prefix.
+      assert.equals(9, captured.buffer)
+      assert.equals(4, captured.range.start.row) -- cursor_line 5, 0-based
+      assert.equals(2, captured.range.start.col) -- cursor_col 3, 0-based
+      assert.equals(4, captured.range["end"].row)
+      assert.equals(2, captured.range["end"].col)
     end)
   end)
 

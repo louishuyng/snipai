@@ -133,7 +133,7 @@ After install, run `:checkhealth snipai` (planned for `v0.1.0`) to verify everyt
 
 **1. Install the plugin** (see above).
 
-**2. Create your first snippet** at `~/.config/nvim/snipai/snippets.json`:
+**2. Create your first snippet** at `~/.config/snipai/snippets.json`:
 
 ```json
 {
@@ -178,6 +178,7 @@ and that your `nvim-cmp` config includes `{ name = "snipai" }` in its `sources` 
     "description": "Shown in cmp as the item's detail",
     "prefix":      "what the user types to summon it",
     "body":        "Prompt template with {{placeholders}} for parameters",
+    "filetype":    "lua",                       // optional; see below
     "parameter": {
       "<name>": {
         "type":        "string" | "text" | "select" | "boolean",
@@ -191,6 +192,16 @@ and that your `nvim-cmp` config includes `{ name = "snipai" }` in its `sources` 
 }
 ```
 
+**`filetype` scoping:**
+
+| Shape | Meaning |
+|---|---|
+| *(omitted)* | available in every buffer (default) |
+| `"lua"` | offered only when `vim.bo.filetype == "lua"` |
+| `["lua", "luau"]` | offered when the buffer filetype matches any entry |
+
+The filter is applied at the cmp source: non-matching snippets are silently dropped from the completion list, so a Markdown-scoped prompt never pollutes a TypeScript buffer.
+
 **Parameter type reference:**
 
 | `type` | Widget | Validation |
@@ -202,7 +213,7 @@ and that your `nvim-cmp` config includes `{ name = "snipai" }` in its `sources` 
 
 **Loading order:** snippets are read from *every* path in `config_paths` and merged left-to-right — later paths override earlier ones by snippet name. By default:
 
-1. `~/.config/nvim/snipai/snippets.json` (global)
+1. `~/.config/snipai/snippets.json` (global; respects `$XDG_CONFIG_HOME`)
 2. `<cwd>/.snipai.json` (per-project, overrides global)
 
 Invalid snippets are **skipped** (not aborted), with one notification pointing at the offender.
@@ -260,14 +271,17 @@ Remap any of these via `setup({ keymaps = { … } })`, or pass `keymaps = false`
 All keys are optional. The defaults shown below are applied when you call `setup()` with no argument.
 
 ```lua
+local xdg_config = os.getenv("XDG_CONFIG_HOME") or (os.getenv("HOME") .. "/.config")
+local xdg_data   = os.getenv("XDG_DATA_HOME")   or (os.getenv("HOME") .. "/.local/share")
+
 require("snipai").setup({
   config_paths = {
-    vim.fn.stdpath("config") .. "/snipai/snippets.json",
-    ".snipai.json", -- cwd-relative; re-resolved each run
+    xdg_config .. "/snipai/snippets.json",  -- ~/.config/snipai/snippets.json
+    ".snipai.json",                          -- cwd-relative; re-resolved each run
   },
 
   history = {
-    path        = vim.fn.stdpath("data") .. "/snipai/history.jsonl",
+    path        = xdg_data .. "/snipai/history.jsonl", -- ~/.local/share/snipai/history.jsonl
     max_entries = 500,
     per_project = true,
   },

@@ -1,11 +1,14 @@
 -- Configuration: defaults + deep merge with user opts.
 --
--- Zero-config defaults are resolved on demand so this module stays usable
--- from standalone busted. stdpath() lookups are tried in this order:
+-- Path resolution is pure XDG — snipai owns its own ~/.config/snipai and
+-- ~/.local/share/snipai trees rather than nesting under the Neovim
+-- config dir. The module has no Neovim dependency, which also lets it
+-- be driven from standalone busted or a future non-nvim frontend.
+--
+-- Resolution order:
 --   1. caller-injected env.config_dir / env.data_dir (tests)
---   2. vim.fn.stdpath() if Neovim is loaded (production)
---   3. $XDG_CONFIG_HOME / $XDG_DATA_HOME from the environment
---   4. $HOME/.config and $HOME/.local/share (last-resort fallback)
+--   2. $XDG_CONFIG_HOME / $XDG_DATA_HOME from the environment
+--   3. $HOME/.config and $HOME/.local/share (last-resort fallback)
 --
 -- Merge rules (summary — README and vimdoc are the canonical reference):
 --   * config_paths      : REPLACED when the user provides it
@@ -17,7 +20,7 @@
 local M = {}
 
 -- ---------------------------------------------------------------------------
--- stdpath resolution (layered, non-mutating)
+-- XDG path resolution (layered, non-mutating)
 -- ---------------------------------------------------------------------------
 
 local function home()
@@ -29,9 +32,6 @@ local function resolve_config_dir(env)
   if env.config_dir then
     return env.config_dir
   end
-  if vim and vim.fn and vim.fn.stdpath then
-    return vim.fn.stdpath("config")
-  end
   return os.getenv("XDG_CONFIG_HOME") or (home() .. "/.config")
 end
 
@@ -39,9 +39,6 @@ local function resolve_data_dir(env)
   env = env or {}
   if env.data_dir then
     return env.data_dir
-  end
-  if vim and vim.fn and vim.fn.stdpath then
-    return vim.fn.stdpath("data")
   end
   return os.getenv("XDG_DATA_HOME") or (home() .. "/.local/share")
 end

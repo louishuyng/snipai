@@ -1,8 +1,9 @@
 local config = require("snipai.config")
 
 -- Deterministic env for every test: no reliance on the user's real
--- XDG_* or $HOME. Production wiring goes through vim.fn.stdpath; that is
--- exercised at integration level, not here.
+-- XDG_* or $HOME. Path resolution is pure XDG now (no vim.fn.stdpath),
+-- so an injected env.config_dir / env.data_dir pins the XDG roots
+-- directly.
 local TEST_ENV = { config_dir = "/tmp/cfg", data_dir = "/tmp/data" }
 
 describe("snipai.config", function()
@@ -17,19 +18,13 @@ describe("snipai.config", function()
       assert.equals(2, #paths)
     end)
 
-    it("falls back to XDG env vars when no env is injected and vim is absent", function()
-      -- The test suite runs under bare Lua where `vim` is nil.
-      local old_config = os.getenv("XDG_CONFIG_HOME")
-      local old_home = os.getenv("HOME")
-      os.execute("true") -- placeholder so the test does something even if setenv is unavailable
-      -- We cannot reliably setenv portably from Lua 5.4, so just assert
-      -- that the call does not error and returns a non-empty string.
+    it("falls back to XDG env vars when no env is injected", function()
+      -- setenv is not portable from pure Lua, so just exercise the
+      -- fallback path and assert a well-formed non-empty string.
       local paths = config.default_config_paths()
       assert.is_string(paths[1])
       assert.not_equals("", paths[1])
-      -- touch unused locals to silence strict linters
-      local _ = old_config
-      local __ = old_home
+      assert.truthy(paths[1]:find("/snipai/snippets.json", 1, true))
     end)
   end)
 

@@ -24,10 +24,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Snippet-aware parameter form (`lua/snipai/ui/param_form.lua`): translates `snippet.parameter` into an ordered field list (placeholders in body order, leftovers alphabetically), collects raw values, resolves defaults, validates via `params.validate_all`, and guarantees `on_submit` only fires with valid values.
 - `snipai.trigger()` opens the parameter form when the caller passes no `ctx.params` and the snippet declares any; an explicit `ctx.params` table (even `{}`) skips the form for programmatic callers.
 - nvim-cmp completion source (`lua/snipai/sources/cmp.lua`): prefix-based matching against the registry, `[AI]` menu tag, `insertText=""` so the typed prefix is dropped on confirm, and `execute()` delegating to `snipai.trigger`. `require("snipai.sources.cmp").register()` installs the source under name `"snipai"`; idempotent and a no-op when cmp is not installed.
+- Optional `filetype` field on snippets — single string (`"lua"`) or non-empty array (`["lua","luau"]`). Missing is backward-compatible "any buffer". Enforced at the cmp source via `Snippet:matches_filetype(ft)`; non-matching snippets are silently dropped from completion.
 - Full project documentation: `README.md`, `doc/snipai.txt` (vimdoc), `ARCHITECTURE.md`, `CONTRIBUTING.md`, this changelog.
 
 ### Changed
 - Dropped the hard dependency on `nvchad/volt` in favour of `vim.ui.input` / `vim.ui.select`; users get popup-style prompts automatically when any `dressing.nvim` / `snacks.nvim` / `telescope-ui-select.nvim` override is installed.
+- **BREAKING** (pre-1.0): default snippet location moved from `~/.config/nvim/snipai/snippets.json` to `~/.config/snipai/snippets.json`; default history location moved from `~/.local/share/nvim/snipai/history.jsonl` to `~/.local/share/snipai/history.jsonl`. Snipai now owns its own XDG directories instead of nesting under the Neovim config/data trees. `config.lua` no longer probes `vim.fn.stdpath()` — path resolution is pure XDG (env overrides → `$XDG_{CONFIG,DATA}_HOME` → `$HOME/.config` / `$HOME/.local/share`). Users who relied on the old paths can either `mv` their files or set `config_paths` / `history.path` explicitly in `setup({...})`.
 
 ### Fixed
 - _(nothing yet)_

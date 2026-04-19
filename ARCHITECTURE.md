@@ -189,7 +189,7 @@ The rule is simple: **arrows point downward in the Layers diagram; never upward.
 | `snippet`, `registry` | `config`, `params` | UI, pickers, adapters, jobs, history |
 | `claude/runner` | `vim.system` (or plenary.job fallback), `claude/parser` | jobs, history, UI |
 | `jobs/*` | `claude/*`, `events`, `snippet`, `notify` | UI, pickers, adapters |
-| `history/*` | filesystem (`vim.fn.stdpath`, `vim.uv`), `events` | UI, pickers, adapters, jobs |
+| `history/*` | filesystem (`vim.uv`, injectable fs), `events` | UI, pickers, adapters, jobs |
 | `ui/*`, `pickers/*`, `sources/*` | core modules + their own runtime dep (`vim.ui` / Telescope / cmp) | each other (UI should not require pickers; sources should not require UI) |
 | `init.lua`, `plugin/snipai.lua` | anything | — |
 

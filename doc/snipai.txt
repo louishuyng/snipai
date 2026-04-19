@@ -1,0 +1,428 @@
+*snipai.txt*        AI-powered snippets for Neovim, backed by Claude Code
+
+Author:   Louis Huy Nguyen <louis.nguyen@regask.com>
+License:  MIT
+Homepage: https://github.com/louishuyng/snipai
+
+==============================================================================
+CONTENTS                                                     *snipai-contents*
+
+  1. Introduction ..................... |snipai-intro|
+  2. Requirements ..................... |snipai-requirements|
+  3. Installation ..................... |snipai-install|
+  4. Quickstart ....................... |snipai-quickstart|
+  5. Snippet JSON schema .............. |snipai-schema|
+  6. Commands ......................... |snipai-commands|
+  7. Default mappings ................. |snipai-mappings|
+  8. Configuration .................... |snipai-config|
+  9. Lua API .......................... |snipai-api|
+ 10. Events ........................... |snipai-events|
+ 11. Troubleshooting .................. |snipai-troubleshooting|
+ 12. FAQ .............................. |snipai-faq|
+ 13. Changelog & Roadmap .............. |snipai-changelog|
+ 14. License .......................... |snipai-license|
+
+==============================================================================
+1. INTRODUCTION                                                 *snipai-intro*
+
+|snipai| turns your snippet library into an AI agent. Declare snippets in
+JSON with a `body` template and typed parameters. Type a prefix, pick the
+snippet from |nvim-cmp|, fill in any declared parameters, and let Claude
+Code do the work — edit files, run tests, anything the Claude Code CLI can
+do — while you keep editing.
+
+History is kept per project; file changes from any past run can be dropped
+into the quickfix list (see |snipai-mappings|).
+
+==============================================================================
+2. REQUIREMENTS                                          *snipai-requirements*
+
+  - Neovim v0.10 or newer (for `vim.system`, `vim.uv`, `vim.islist`)
+  - Claude Code CLI on `$PATH` (or point `claude.cmd` at an absolute path)
+  - hrsh7th/nvim-cmp (required until blink.cmp adapter lands in v0.2.0)
+  - nvim-telescope/telescope.nvim (for |:SnipaiRunning|, |:SnipaiHistory|)
+  - nvchad/volt (popup UI for the parameter form and detail view)
+  - OPTIONAL: rcarriga/nvim-notify or j-hui/fidget.nvim for richer
+    progress notifications; stock |vim.notify()| is used otherwise.
+
+Verify the Claude CLI is available: >bash
+    claude --version
+<
+
+==============================================================================
+3. INSTALLATION                                               *snipai-install*
+
+lazy.nvim ~
+>lua
+    {
+      "louishuyng/snipai",
+      dependencies = {
+        "hrsh7th/nvim-cmp",
+        "nvim-telescope/telescope.nvim",
+        "nvchad/volt",
+        "rcarriga/nvim-notify", -- optional
+      },
+      event = "InsertEnter",
+      config = function()
+        require("snipai").setup()
+      end,
+    }
+<
+
+packer.nvim ~
+>lua
+    use({
+      "louishuyng/snipai",
+      requires = {
+        "hrsh7th/nvim-cmp",
+        "nvim-telescope/telescope.nvim",
+        "nvchad/volt",
+        { "rcarriga/nvim-notify", opt = true },
+      },
+      config = function() require("snipai").setup() end,
+    })
+<
+
+vim-plug ~
+>vim
+    Plug 'hrsh7th/nvim-cmp'
+    Plug 'nvim-telescope/telescope.nvim'
+    Plug 'nvchad/volt'
+    Plug 'rcarriga/nvim-notify'
+    Plug 'louishuyng/snipai'
+    lua require('snipai').setup()
+<
+
+==============================================================================
+4. QUICKSTART                                              *snipai-quickstart*
+
+Step 1. Install the plugin (see |snipai-install|).
+
+Step 2. Create your first snippet at
+`~/.config/nvim/snipai/snippets.json`: >json
+    {
+      "typescript_file": {
+        "description": "Generate a TypeScript file and run its tests",
+        "prefix": "aits",
+        "body": "Generate a typescript file named {{file_name}} that does the following: {{content}}. Then run `npm test` and fix any failures.",
+        "parameter": {
+          "file_name": {
+            "type": "string",
+            "description": "The name of the file to be created"
+          },
+          "content": {
+            "type": "text",
+            "description": "What the file should do"
+          }
+        }
+      }
+    }
+<
+
+Step 3. Trigger it. Open any buffer, type `aits` — the snippet shows up in
+|nvim-cmp| with an AI icon. Hit <CR>, fill the popup, submit. Claude Code
+runs in the background.
+
+Step 4. Check history with `<leader>sh`. Press <C-q> on any entry to put
+its file changes in the quickfix list.
+
+==============================================================================
+5. SNIPPET JSON SCHEMA                                         *snipai-schema*
+
+Each top-level key is the snippet's internal name. Shape: >json
+    {
+      "<snippet_name>": {
+        "description": "Shown in cmp as the item's detail",
+        "prefix":      "what the user types to summon it",
+        "body":        "Prompt with {{placeholders}} for parameters",
+        "parameter": {
+          "<name>": {
+            "type":        "string" | "text" | "select" | "boolean",
+            "description": "Shown as the field label in the popup",
+            "options":     ["ts", "js", "lua"],
+            "default":     "ts",
+            "optional":    false
+          }
+        }
+      }
+    }
+<
+
+Parameter types ~
+
+  `string`   single-line input; newlines stripped; non-empty if required
+  `text`     multi-line textarea; non-empty if required
+  `select`   enum picker; value must be in `options` (required field)
+  `boolean`  toggle; always valid
+
+`default` must match the declared type or it is dropped at load time.
+`optional = true` allows an empty value (falls back to `""`, `false`, or
+`default` if provided).
+
+Loading order ~
+
+Snippets are read from every path in `config_paths` and merged in order —
+later paths override earlier ones by snippet name. Defaults:
+
+  1. `stdpath("config")/snipai/snippets.json`  — global
+  2. `<cwd>/.snipai.json`                      — per-project override
+
+Invalid snippets are SKIPPED, not fatal. One |vim.notify()| warning points
+at the offender with line/field details. Valid snippets in the same file
+still load.
+
+==============================================================================
+6. COMMANDS                                                 *snipai-commands*
+
+                                                              *:SnipaiRunning*
+:SnipaiRunning              Telescope picker of currently running snippet
+                            jobs. Default mapping: `<leader>sr`.
+
+                                                              *:SnipaiHistory*
+:SnipaiHistory [project|all]
+                            History picker. `project` (default) shows only
+                            the current workspace; `all` shows every
+                            project. Default mappings: `<leader>sh` (project)
+                            and `<leader>sH` (all).
+
+                                                               *:SnipaiDetail*
+:SnipaiDetail {id}          Open a detail popup for a history entry (shows
+                            the rendered prompt, parameters, status,
+                            duration, and `files_changed`).
+
+                                                           *:SnipaiToQuickfix*
+:SnipaiToQuickfix {id}      Push a history entry's `files_changed` into the
+                            |quickfix| list. Equivalent to <C-q> in the
+                            history picker.
+
+                                                               *:SnipaiCancel*
+:SnipaiCancel {id}          Cancel a running job (SIGTERM the Claude
+                            subprocess). History entry is finalized with
+                            status `cancelled`.
+
+                                                               *:SnipaiReload*
+:SnipaiReload               Re-read all JSON snippet configs. Useful after
+                            editing `.snipai.json`.
+
+                                                              *:SnipaiTrigger*
+:SnipaiTrigger {name}       Run a snippet by name without going through
+                            |nvim-cmp|. Useful for custom keymaps.
+
+==============================================================================
+7. DEFAULT MAPPINGS                                        *snipai-mappings*
+
+Global (active unless `keymaps = false` in |snipai.setup()|):
+
+  `<leader>sr`        |:SnipaiRunning|
+  `<leader>sh`        |:SnipaiHistory| project
+  `<leader>sH`        |:SnipaiHistory| all
+
+Running picker (buffer-local):
+
+  <CR>              open detail popup
+  <C-c>             cancel the selected job
+
+History picker (buffer-local):
+
+  <CR>              open detail popup
+  <C-q>             push `files_changed` to quickfix, close picker
+  <C-r>             replay the snippet with its original parameters
+  <C-d>             delete the history entry
+
+Override any default via `setup({ keymaps = { … } })`. See |snipai-config|.
+
+==============================================================================
+8. CONFIGURATION                                             *snipai-config*
+
+                                                          *snipai.setup()*
+snipai.setup({opts})
+
+All keys are optional. Calling `setup()` with no argument uses the
+defaults shown below: >lua
+    require("snipai").setup({
+      config_paths = {
+        vim.fn.stdpath("config") .. "/snipai/snippets.json",
+        ".snipai.json", -- cwd-relative; re-resolved each run
+      },
+
+      history = {
+        path        = vim.fn.stdpath("data") .. "/snipai/history.jsonl",
+        max_entries = 500,
+        per_project = true,
+      },
+
+      claude = {
+        cmd        = "claude",
+        extra_args = {},
+        timeout_ms = 5 * 60 * 1000,
+      },
+
+      ui = {
+        notify = "auto",       -- "auto"|"vim"|"notify"|"fidget"
+        picker = "telescope",  -- "telescope" (phase 1)
+      },
+
+      keymaps = {
+        running     = "<leader>sr",
+        history     = "<leader>sh",
+        history_all = "<leader>sH",
+        detail      = "<CR>",
+        to_qf       = "<C-q>",
+        cancel      = "<C-c>",
+      },
+    })
+<
+
+Merge semantics ~
+
+  `config_paths`           REPLACED (not appended). Use
+                           |snipai.default_config_paths()| to extend.
+  `history`,`claude`,`ui`  deep merged with defaults
+  `keymaps`                deep merged with defaults, OR set to `false`
+                           to disable all default mappings
+
+Extending `config_paths` ~
+>lua
+    require("snipai").setup({
+      config_paths = vim.list_extend(
+        require("snipai.config").default_config_paths(),
+        { "~/work/team-snippets.json" }
+      ),
+    })
+<
+
+==============================================================================
+9. LUA API                                                       *snipai-api*
+
+                                                           *snipai.trigger()*
+snipai.trigger({name_or_snippet} [, {ctx}])
+    Execute a snippet. Same entry point the nvim-cmp source uses on select.
+    Returns the spawned `Job` table.
+
+                                                          *snipai.jobs.list()*
+snipai.jobs.list()
+    Returns a list of currently-running jobs.
+
+                                                        *snipai.jobs.cancel()*
+snipai.jobs.cancel({job_id})
+    Cancel a running job (SIGTERM). Returns `true` on success.
+
+                                                       *snipai.history.list()*
+snipai.history.list([{opts}])
+    List history entries. {opts}: >lua
+        { scope = "project" }   -- or "all"
+<
+
+                                                        *snipai.history.get()*
+snipai.history.get({entry_id})
+    Return one history entry, or `nil` if not found.
+
+                                                *snipai.history.to_quickfix()*
+snipai.history.to_quickfix({entry_id})
+    Populate the quickfix list with `files_changed` from the given entry.
+
+                                                            *snipai.reload()*
+snipai.reload()
+    Re-read every file in `config_paths`.
+
+                                             *snipai.default_config_paths()*
+require("snipai.config").default_config_paths()
+    Returns the default `config_paths` list so callers can extend it
+    without hardcoding the defaults.
+
+==============================================================================
+10. EVENTS                                                    *snipai-events*
+
+|snipai| exposes an internal event bus. Useful for statusline widgets,
+logging, or integrating with other plugins: >lua
+    local bus = require("snipai.events")
+    local unsubscribe = bus.global:subscribe("job_done", function(job, code)
+      -- ...
+    end)
+<
+
+Event catalog ~
+
+  `job_started`         job
+  `job_progress`        job, normalized event {kind=..., ...}
+  `job_done`            job, exit_code
+  `job_cancelled`       job
+  `history_added`       history entry
+  `history_finalized`   entry (with status, duration_ms, files_changed)
+
+Handlers that throw are isolated — other handlers still run. Set
+`bus.on_error = fn` to observe handler errors.
+
+==============================================================================
+11. TROUBLESHOOTING                                  *snipai-troubleshooting*
+
+Snippet doesn't appear in cmp ~
+    Run |:SnipaiReload| and check |:messages|. Common causes: `body`
+    references an undeclared `{{placeholder}}`; missing `prefix`; JSON
+    parse error. Invalid snippets are skipped with a warning.
+
+"command not found: claude" ~
+    Set `claude.cmd` to an absolute path, or make `claude` visible on
+    Neovim's `$PATH`. Test with: >
+        :echo exepath('claude')
+<
+
+Snippet hangs forever ~
+    Default `claude.timeout_ms` is 5 minutes. Raise it in |snipai.setup()|,
+    or |:SnipaiCancel| the stuck job.
+
+No notification on completion ~
+    Backend auto-detect picked the wrong one (or none). Force it: >lua
+        require("snipai").setup({ ui = { notify = "notify" } })
+<
+
+History file grew huge ~
+    `history.max_entries` (default 500) caps the JSONL and prunes oldest
+    entries on every finalize. Clear manually with: >lua
+        :lua require("snipai.history").clear()
+<
+
+Quickfix list is empty after <C-q> ~
+    Likely the run finished with no `Edit`/`Write` tool uses (e.g. a
+    research-only prompt). Check |:SnipaiDetail| to see what happened.
+
+==============================================================================
+12. FAQ                                                         *snipai-faq*
+
+Q: Why not the Anthropic API directly? ~
+A: Because useful snippets edit files and run tools, not just return
+   text. The Claude Code CLI gives us that tool loop, plus your existing
+   auth and model selection. A text-only API backend is on the roadmap.
+
+Q: Does this replace LuaSnip? ~
+A: No. LuaSnip is for text expansion; |snipai| is for AI-backed runs.
+   Both can coexist in |nvim-cmp|.
+
+Q: Is the JSON schema compatible with VSCode snippets? ~
+A: No. Shape is inspired by it but extended with typed `parameter`
+   definitions and AI-specific body templates.
+
+Q: What gets sent to Anthropic? ~
+A: Only the rendered `body` of the snippet you triggered, plus whatever
+   tools the `claude` subprocess chooses to read (exactly like running it
+   from the terminal). See |:SnipaiDetail| for the exact prompt used.
+
+==============================================================================
+13. CHANGELOG & ROADMAP                                   *snipai-changelog*
+
+See `CHANGELOG.md` in the repository for per-version history and planned
+features. Phase map:
+
+  v0.1.0-alpha   MVP: cmp source + parameter popup
+  v0.1.0         pickers, commands, vimdoc, README (first tagged release)
+  v0.2.0         blink.cmp adapter, replay, streaming progress,
+                 cancel command, concurrency limits
+
+==============================================================================
+14. LICENSE                                                 *snipai-license*
+
+MIT License. Copyright (c) 2026 Louis Huy Nguyen.
+
+See the `LICENSE` file in the repository for the full text.
+
+vim:tw=78:ts=8:ft=help:norl:

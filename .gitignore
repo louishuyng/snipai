@@ -1,0 +1,20 @@
+# test/build deps cloned by `make deps`
+.deps/
+
+# generated vimdoc tags
+doc/tags
+
+# editor / os cruft
+*.swp
+*.swo
+.netrwhist
+.DS_Store
+
+# logs
+*.log
+
+# local-only config overrides (user may scaffold their own)
+.snipai.local.json
+
+# superpowers/brainstorming specs — kept locally for reference, never committed
+docs/superpowers/

@@ -1,0 +1,19 @@
+-- Busted configuration.
+--
+-- Lets `busted tests/unit/foo_spec.lua` find modules under `lua/` the way
+-- Neovim plugins lay them out, without needing to juggle LUA_PATH manually.
+
+return {
+  _all = {
+    verbose = true,
+    lpath = "./lua/?.lua;./lua/?/init.lua",
+  },
+  default = {
+    ROOT = { "tests/unit" },
+    pattern = "_spec%.lua$",
+  },
+  unit = {
+    ROOT = { "tests/unit" },
+    pattern = "_spec%.lua$",
+  },
+}

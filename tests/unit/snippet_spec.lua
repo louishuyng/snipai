@@ -164,6 +164,65 @@ describe("snipai.snippet", function()
       assert.is_false(ok)
       assert.matches("filetype", err)
     end)
+
+    it("accepts an insert field that is a non-empty string", function()
+      local s = make({ prefix = "p", body = "b", insert = "-- stub\n" })
+      assert.is_true(s:validate())
+    end)
+
+    it("accepts insert that references declared params", function()
+      local s = make({
+        prefix = "p",
+        body = "b",
+        insert = "-- {{purpose}}\n",
+        parameter = { purpose = { type = "text" } },
+      })
+      assert.is_true(s:validate())
+    end)
+
+    it("accepts insert and body that reference reserved built-ins without declaring them", function()
+      local s = make({
+        prefix = "p",
+        body = "enrich {{cursor_file}} at line {{cursor_line}}",
+        insert = "-- {{cursor_file}}:{{cursor_line}} in {{cwd}}\n",
+      })
+      assert.is_true(s:validate())
+    end)
+
+    it("rejects insert that is an empty string", function()
+      local ok, err = make({ prefix = "p", body = "b", insert = "" }):validate()
+      assert.is_false(ok)
+      assert.matches("insert", err)
+    end)
+
+    it("rejects insert that is not a string", function()
+      local ok, err = make({ prefix = "p", body = "b", insert = 42 }):validate()
+      assert.is_false(ok)
+      assert.matches("insert", err)
+    end)
+
+    it("rejects insert that references an undeclared non-reserved placeholder", function()
+      local ok, err = make({
+        prefix = "p",
+        body = "b",
+        insert = "hello {{missing}}",
+      }):validate()
+      assert.is_false(ok)
+      assert.matches("insert", err)
+      assert.matches("missing", err)
+    end)
+
+    it("rejects a declared parameter whose name collides with a reserved built-in", function()
+      for name in pairs(require("snipai.snippet").RESERVED) do
+        local ok, err = make({
+          prefix = "p",
+          body = "b",
+          parameter = { [name] = { type = "string" } },
+        }):validate()
+        assert.is_false(ok, "expected " .. name .. " to be rejected")
+        assert.matches("reserved", err)
+      end
+    end)
   end)
 
   -- =========================================================================
@@ -263,6 +322,72 @@ describe("snipai.snippet", function()
         },
       })
       assert.equals("hello {{other}}", s:render({ msg = "hello {{other}}" }))
+    end)
+
+    it("substitutes reserved built-ins from ctx alongside user params", function()
+      local s = make({
+        prefix = "p",
+        body = "enrich {{cursor_file}}:{{cursor_line}} for {{purpose}}",
+        parameter = { purpose = { type = "text" } },
+      })
+      local out = s:render({ purpose = "logging" }, {
+        cursor_file = "/tmp/x.lua",
+        cursor_line = 42,
+      })
+      assert.equals("enrich /tmp/x.lua:42 for logging", out)
+    end)
+
+    it("renders missing ctx built-ins as empty strings", function()
+      local s = make({
+        prefix = "p",
+        body = "at {{cursor_file}}!",
+      })
+      assert.equals("at !", s:render({}, {}))
+      assert.equals("at !", s:render({}))
+    end)
+  end)
+
+  describe("render_insert", function()
+    it("returns nil when the snippet has no insert field", function()
+      local s = make({ prefix = "p", body = "b" })
+      assert.is_nil(s:render_insert({}))
+    end)
+
+    it("substitutes user params in the insert template", function()
+      local s = make({
+        prefix = "p",
+        body = "b",
+        insert = "-- purpose: {{purpose}}\n",
+        parameter = { purpose = { type = "text" } },
+      })
+      assert.equals("-- purpose: logging\n", s:render_insert({ purpose = "logging" }))
+    end)
+
+    it("substitutes reserved built-ins from ctx alongside user params", function()
+      local s = make({
+        prefix = "p",
+        body = "b",
+        insert = "-- @{{cursor_file}}:{{cursor_line}} ({{purpose}})\n",
+        parameter = { purpose = { type = "text" } },
+      })
+      local out = s:render_insert(
+        { purpose = "auth" },
+        { cursor_file = "/proj/auth.lua", cursor_line = 10 }
+      )
+      assert.equals("-- @/proj/auth.lua:10 (auth)\n", out)
+    end)
+
+    it("returns nil + errors on validation failure (same contract as render)", function()
+      local s = make({
+        prefix = "p",
+        body = "b",
+        insert = "-- {{purpose}}\n",
+        parameter = { purpose = { type = "string" } }, -- required
+      })
+      local out, errors = s:render_insert({})
+      assert.is_nil(out)
+      assert.is_table(errors)
+      assert.matches("required", errors.purpose)
     end)
   end)
 

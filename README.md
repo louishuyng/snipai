@@ -18,12 +18,13 @@
 6. [Commands](#commands)
 7. [Default keybindings](#default-keybindings)
 8. [Configuration](#configuration)
-9. [Events](#events)
-10. [Troubleshooting](#troubleshooting)
-11. [FAQ](#faq)
-12. [Roadmap](#roadmap)
-13. [Contributing](#contributing)
-14. [License](#license)
+9. [Statusline integration](#statusline-integration)
+10. [Events](#events)
+11. [Troubleshooting](#troubleshooting)
+12. [FAQ](#faq)
+13. [Roadmap](#roadmap)
+14. [Contributing](#contributing)
+15. [License](#license)
 
 ---
 
@@ -349,6 +350,35 @@ require("snipai").setup({
   ),
 })
 ```
+
+---
+
+## Statusline integration
+
+`require("snipai.statusline").status(bufnr?)` returns a short indicator string you can drop straight into a statusline. Empty (`""`) when nothing relevant is in flight; `"⟳ snipai"` when one of the currently-running jobs has already emitted an `Edit` / `Write` / `MultiEdit` for the buffer's file. Cheap enough to call on every redraw — guards against being called before `setup()`, against invalid bufnrs, and against unnamed scratch buffers.
+
+```lua
+-- native statusline
+vim.o.statusline = "%f %{%v:lua.require'snipai.statusline'.status()%} %m"
+
+-- lualine
+require("lualine").setup({
+  sections = {
+    lualine_c = {
+      "filename",
+      function() return require("snipai.statusline").status() end,
+    },
+  },
+})
+
+-- custom (function-driven) statusline
+local function snipai()
+  local ok, sl = pcall(require, "snipai.statusline")
+  return ok and sl.status() or ""
+end
+```
+
+For richer state (active job count, per-job progress, last exit status) subscribe directly to the event bus described below — `snipai.statusline` is deliberately minimal and stays a drop-in string.
 
 ---
 

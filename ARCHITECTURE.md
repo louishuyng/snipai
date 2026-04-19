@@ -174,7 +174,9 @@ Each file has **one** purpose. If you find yourself reaching for a second one, i
 
 | File | Role |
 |---|---|
-| `init.lua` | `snipai.setup(opts)` composes config → registry → jobs → history → notify → event wiring. Re-exports public API (`trigger`, `jobs`, `history`, `reload`). |
+| `init.lua` | `snipai.setup(opts)` composes config → registry → jobs → history → notify → event wiring + subscribes `job_done` for the buffer-refresh step. Re-exports public API (`trigger`, `jobs`, `history`, `reload`); `trigger` is a thin wrapper over `snipai.trigger.run(state, ...)`. |
+| `trigger.lua` | State-pure `run(state, name_or_snippet, ctx)` implementing the dispatch (form vs programmatic, insert placement + auto-save, refuse-on-unnamed-scratch). Extracted so `init.lua` stays focused on wiring. |
+| `statusline.lua` | `status(bufnr?)` returning `"⟳ snipai"` when an active job has touched this buffer's file, empty otherwise. Reads state via the public `snipai.jobs.list()` / `Job:files_changed()` API so it stays decoupled from internals. |
 | `plugin/snipai.lua` | Declares `:Snipai*` commands and sets up default keymaps (unless `keymaps = false`). Runs once per Neovim startup. |
 
 ---

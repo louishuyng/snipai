@@ -136,6 +136,7 @@ local function build_test_setup(overrides)
     gather_builtins = overrides.gather_builtins or default_test_builtins,
     place_insert = overrides.place_insert or function() end,
     save_buffer = overrides.save_buffer or function() end,
+    refresh_buffers = overrides.refresh_buffers or function() end,
     reader = overrides.reader,
     json_decode = overrides.json_decode or json.decode,
   }
@@ -557,6 +558,42 @@ describe("snipai (top-level)", function()
       assert.is_true(#deps.notify_calls >= 2)
       assert.matches("running", deps.notify_calls[1].msg)
       assert.matches("1 file", deps.notify_calls[#deps.notify_calls].msg)
+    end)
+
+    it("refreshes affected buffers after job_done", function()
+      local refresh_calls = {}
+      local deps = setup_with_fixture({
+        refresh_buffers = function(files)
+          refresh_calls[#refresh_calls + 1] = files
+        end,
+      })
+      snipai.trigger("no_params")
+      deps.runner.spawns[1].on_event({
+        kind = "tool_use",
+        tool = "Edit",
+        input = { file_path = "a.lua" },
+      })
+      deps.runner.spawns[1].on_event({
+        kind = "tool_use",
+        tool = "Write",
+        input = { file_path = "b.lua" },
+      })
+      deps.runner.spawns[1].on_exit(0, { cancelled = false, stderr = "", parser_errors = {} })
+      assert.equals(1, #refresh_calls)
+      assert.are.same({ "a.lua", "b.lua" }, refresh_calls[1])
+    end)
+
+    it("passes an empty list to refresh_buffers when no files changed", function()
+      local refresh_calls = {}
+      local deps = setup_with_fixture({
+        refresh_buffers = function(files)
+          refresh_calls[#refresh_calls + 1] = files
+        end,
+      })
+      snipai.trigger("no_params")
+      deps.runner.spawns[1].on_exit(0, { cancelled = false, stderr = "", parser_errors = {} })
+      assert.equals(1, #refresh_calls)
+      assert.are.same({}, refresh_calls[1])
     end)
 
     it("cancel: history marked cancelled, files captured before SIGTERM preserved", function()

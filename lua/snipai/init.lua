@@ -21,8 +21,9 @@
 --
 -- Testing: pass opts._deps to inject any or all of { env, events,
 -- notify, history, registry, jobs, runner, reader, json_decode,
--- param_form, gather_builtins, place_insert, save_buffer }. Not part
--- of the public API; leading underscore signals internal.
+-- param_form, gather_builtins, place_insert, save_buffer,
+-- refresh_buffers }. Not part of the public API; leading underscore
+-- signals internal.
 
 local config = require("snipai.config")
 local events_mod = require("snipai.events")
@@ -64,6 +65,32 @@ local function default_save_buffer(buffer)
   end)
 end
 
+-- Why this exists: Claude's Edit / Write tools land on disk, but Neovim
+-- does not auto-reload open buffers pointing at those files — they keep
+-- showing the pre-Claude content until the user hits :e!. :checktime
+-- per touched file makes the enrichment visible immediately. Buffers
+-- whose file Claude never touched, and files the user never opened,
+-- are skipped — nothing to reload in either case.
+local function default_refresh_buffers(files_changed)
+  if files_changed == nil or #files_changed == 0 then
+    return
+  end
+  local touched = {}
+  for _, path in ipairs(files_changed) do
+    touched[path] = true
+  end
+  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_loaded(buf) then
+      local name = vim.api.nvim_buf_get_name(buf)
+      if name ~= "" and touched[name] then
+        vim.api.nvim_buf_call(buf, function()
+          vim.cmd("silent! checktime")
+        end)
+      end
+    end
+  end
+end
+
 local M = {}
 
 -- ---------------------------------------------------------------------------
@@ -81,6 +108,7 @@ local state = {
   gather_builtins = nil,
   place_insert = nil,
   save_buffer = nil,
+  refresh_buffers = nil,
   _initialized = false,
 }
 
@@ -102,10 +130,9 @@ function M.setup(opts)
   local merged = config.merge(opts, deps.env)
 
   local events = deps.events or events_mod.new()
-  local notify = deps.notify
-    or notify_mod.new({
-      backend = merged.ui.notify,
-    })
+  local notify = deps.notify or notify_mod.new({
+    backend = merged.ui.notify,
+  })
 
   local history = deps.history
     or history_mod.new({
@@ -143,7 +170,17 @@ function M.setup(opts)
   state.gather_builtins = deps.gather_builtins or default_gather_builtins
   state.place_insert = deps.place_insert or default_place_insert
   state.save_buffer = deps.save_buffer or default_save_buffer
+  state.refresh_buffers = deps.refresh_buffers or default_refresh_buffers
   state._initialized = true
+
+  -- Subscribe once: every finished job hands its files_changed list to
+  -- the refresh step so open buffers reload from disk after Claude's
+  -- Edit / Write land. Each setup() call binds to a fresh events bus,
+  -- so dropping the previous subscription is unnecessary.
+  events:subscribe("job_done", function(job)
+    local files = job and type(job.files_changed) == "function" and job:files_changed() or {}
+    state.refresh_buffers(files)
+  end)
 
   return M
 end
@@ -202,10 +239,12 @@ local function apply_insert(snippet, values, ctx)
   end
   local range = ctx.replace_range
   if range == nil then
-    local cursor = (ctx.builtins and ctx.builtins.cursor_line) and {
-      row = ctx.builtins.cursor_line - 1,
-      col = (ctx.builtins.cursor_col or 1) - 1,
-    } or { row = 0, col = 0 }
+    local cursor = (ctx.builtins and ctx.builtins.cursor_line)
+        and {
+          row = ctx.builtins.cursor_line - 1,
+          col = (ctx.builtins.cursor_col or 1) - 1,
+        }
+      or { row = 0, col = 0 }
     range = { start = cursor, ["end"] = cursor }
   end
   state.place_insert(ctx.buffer, range, text)
@@ -338,6 +377,7 @@ function M._reset()
   state.gather_builtins = nil
   state.place_insert = nil
   state.save_buffer = nil
+  state.refresh_buffers = nil
   state._initialized = false
 end
 

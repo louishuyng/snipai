@@ -178,6 +178,7 @@ and that your `nvim-cmp` config includes `{ name = "snipai" }` in its `sources` 
     "description": "Shown in cmp as the item's detail",
     "prefix":      "what the user types to summon it",
     "body":        "Prompt template with {{placeholders}} for parameters",
+    "insert":      "Optional — text dropped at the cursor before the run",
     "filetype":    "lua",                       // optional; see below
     "parameter": {
       "<name>": {
@@ -191,6 +192,23 @@ and that your `nvim-cmp` config includes `{ name = "snipai" }` in its `sources` 
   }
 }
 ```
+
+**`insert` templates:**
+
+When `insert` is set, picking the snippet from cmp drops the rendered template at the cursor in place of the typed prefix, silently `:writes` the buffer, then kicks off the Claude run. Claude sees the on-disk file already has your scaffold and enriches it with `Edit` / `MultiEdit` — when the job finishes, open buffers pointing at touched files reload automatically via `:checktime`. Snippets without `insert` do not touch the buffer or auto-save; Claude just runs with the rendered `body` as its prompt.
+
+Requirements for insert-flavored snippets: the buffer must be saved to a real file on disk — unnamed scratch buffers are refused up front with an error notification, since there is nothing for Claude to enrich.
+
+**Built-in parameters:**
+
+The following names are reserved and auto-populated by the plugin at trigger time. Reference them in `{{placeholders}}` inside `insert` or `body`; **do not** declare them in `parameter` (validation will skip the snippet with a `"reserved built-in name"` error).
+
+| Name | Value |
+|---|---|
+| `cursor_file` | absolute path of the buffer, or empty on unnamed scratch buffers |
+| `cursor_line` | 1-based line under the cursor at trigger time |
+| `cursor_col` | 1-based column under the cursor at trigger time |
+| `cwd` | `vim.fn.getcwd()` of the window that triggered the snippet |
 
 **`filetype` scoping:**
 

@@ -167,7 +167,7 @@ Each file has **one** purpose. If you find yourself reaching for a second one, i
 
 | Module | Exports | Role |
 |---|---|---|
-| `sources.cmp` | `new(snipai_api?)`, `register(snipai_api?, cmp_mod?)` | nvim-cmp source. `complete()` maps `registry:lookup_prefix` to cmp items (`insertText=""` so the typed prefix is dropped), `execute()` delegates to `snipai.trigger(name)`. `register()` resolves cmp via `pcall(require, "cmp")`, is idempotent, returns false when cmp is not installed. |
+| `sources.cmp` | `new(snipai_api?)`, `register(snipai_api?, cmp_mod?)` | nvim-cmp source. `complete()` maps `registry:lookup_prefix` to cmp items; `insertText` re-inserts the typed prefix on confirm (zero visual change) so `trigger()` can swap the captured range for the rendered `insert` template once the param form submits. `execute()` builds `{buffer, replace_range}` ctx and delegates to `snipai.trigger(name, ctx)`. `register()` resolves cmp via `pcall(require, "cmp")`, is idempotent, returns false when cmp is not installed. |
 | `sources.blink` | blink.cmp source object (phase 5) | same contract, different engine API. |
 
 ### Entry points

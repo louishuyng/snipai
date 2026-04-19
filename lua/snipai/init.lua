@@ -11,14 +11,18 @@
 --   snipai.history.list({scope}) / get(id) / clear()
 --   snipai.reload()
 --
--- trigger(ctx) with required-but-unprovided params fails fast with the
--- per-field error table from snippet:render — the param-form popup
--- that fills that gap is a UI concern for a later step and is not
--- required to exercise the full runner + history pipeline from Lua.
+-- trigger() behaviour depends on whether the caller supplied params:
+--   * ctx.params provided (even empty {}) -> spawn immediately, letting
+--     snippet:render apply declared defaults for any missing keys.
+--   * ctx.params nil AND snippet declares params -> open the param form
+--     and spawn on submit; user cancel or validation failure returns no
+--     job and does not error.
+--   * ctx.params nil AND snippet declares no params -> spawn immediately.
 --
 -- Testing: pass opts._deps to inject any or all of { env, events,
--- notify, history, registry, jobs, runner, reader, json_decode }.
--- Not part of the public API; leading underscore signals internal.
+-- notify, history, registry, jobs, runner, reader, json_decode,
+-- param_form }. Not part of the public API; leading underscore
+-- signals internal.
 
 local config = require("snipai.config")
 local events_mod = require("snipai.events")
@@ -26,6 +30,7 @@ local notify_mod = require("snipai.notify")
 local history_mod = require("snipai.history")
 local registry_mod = require("snipai.registry")
 local jobs_mod = require("snipai.jobs")
+local param_form_mod = require("snipai.ui.param_form")
 
 local M = {}
 
@@ -40,6 +45,7 @@ local state = {
   history = nil,
   registry = nil,
   jobs = nil,
+  param_form = nil,
   _initialized = false,
 }
 
@@ -98,6 +104,7 @@ function M.setup(opts)
   state.history = history
   state.registry = registry
   state.jobs = jobs
+  state.param_form = deps.param_form or param_form_mod
   state._initialized = true
 
   return M
@@ -121,6 +128,10 @@ local function resolve_snippet(name_or_snippet)
   return s
 end
 
+local function snippet_has_params(snippet)
+  return next(snippet.parameter or {}) ~= nil
+end
+
 function M.trigger(name_or_snippet, ctx)
   ensure_initialized()
   ctx = ctx or {}
@@ -129,7 +140,23 @@ function M.trigger(name_or_snippet, ctx)
     state.notify:notify(err, "error")
     return nil, err
   end
-  return state.jobs:spawn(snippet, ctx.params or {}, ctx)
+
+  if ctx.params ~= nil or not snippet_has_params(snippet) then
+    return state.jobs:spawn(snippet, ctx.params or {}, ctx)
+  end
+
+  -- Form-driven path. If the form backend submits synchronously (tests,
+  -- sequential vim.ui.input chains) we can still return the spawned job
+  -- to the caller; an async popup backend leaves the return value nil.
+  local spawned_job, spawn_err
+  state.param_form.open(snippet, {
+    notify = state.notify,
+    on_submit = function(values)
+      spawned_job, spawn_err = state.jobs:spawn(snippet, values, ctx)
+    end,
+    on_cancel = function() end,
+  })
+  return spawned_job, spawn_err
 end
 
 -- ---------------------------------------------------------------------------
@@ -203,6 +230,7 @@ function M._reset()
   state.history = nil
   state.registry = nil
   state.jobs = nil
+  state.param_form = nil
   state._initialized = false
 end
 

@@ -79,6 +79,18 @@ local function json_reader(contents)
   end
 end
 
+-- Default fake param form: auto-submits empty values so existing tests
+-- exercise the "ctx.params nil but snippet has defaults" path exactly
+-- as they did before the form wiring landed (snippet:render fills in
+-- declared defaults for missing keys).
+local function auto_submit_form()
+  return {
+    open = function(_, form_opts)
+      form_opts.on_submit({})
+    end,
+  }
+end
+
 -- Builds a setup() args table wired entirely with fakes.
 local function build_test_setup(overrides)
   overrides = overrides or {}
@@ -86,6 +98,7 @@ local function build_test_setup(overrides)
   local runner = overrides.runner or new_fake_runner()
   local events = events_mod.new()
   local notify, notify_calls = new_recording_notify()
+  local param_form = overrides.param_form or auto_submit_form()
 
   local history = history_mod.new({
     path = "/history.jsonl",
@@ -107,6 +120,7 @@ local function build_test_setup(overrides)
     notify = notify,
     history = history,
     runner = runner,
+    param_form = param_form,
     reader = overrides.reader,
     json_decode = overrides.json_decode or json.decode,
   }
@@ -125,6 +139,7 @@ local function build_test_setup(overrides)
     notify = notify,
     notify_calls = notify_calls,
     history = history,
+    param_form = param_form,
   }
 end
 
@@ -141,11 +156,11 @@ local FIXTURE_CONFIG_JSON = json.encode({
   },
 })
 
-local function setup_with_fixture()
-  local opts, deps = build_test_setup({
-    reader = json_reader({ [FIXTURE_CONFIG_PATH] = FIXTURE_CONFIG_JSON }),
-    config_paths = { FIXTURE_CONFIG_PATH },
-  })
+local function setup_with_fixture(extra)
+  extra = extra or {}
+  extra.reader = json_reader({ [FIXTURE_CONFIG_PATH] = FIXTURE_CONFIG_JSON })
+  extra.config_paths = { FIXTURE_CONFIG_PATH }
+  local opts, deps = build_test_setup(extra)
   snipai.setup(opts)
   return deps
 end
@@ -238,6 +253,66 @@ describe("snipai (top-level)", function()
       assert.matches("requires a snippet name", err)
       local _, err2 = snipai.trigger(42)
       assert.matches("requires a snippet name", err2)
+    end)
+  end)
+
+  describe("trigger with param form", function()
+    it("opens the form when ctx.params is nil and snippet declares params", function()
+      local captured
+      local form = {
+        open = function(snippet, form_opts)
+          captured = { snippet = snippet, form_opts = form_opts }
+          form_opts.on_submit({ thing = "rocket" })
+        end,
+      }
+      local deps = setup_with_fixture({ param_form = form })
+      local job = snipai.trigger("sample_snippet")
+      assert.truthy(captured)
+      assert.equals("sample_snippet", captured.snippet.name)
+      assert.equals(deps.notify, captured.form_opts.notify)
+      assert.truthy(job)
+      assert.equals("generate a rocket", deps.runner.spawns[1].prompt)
+    end)
+
+    it("skips the form when ctx.params is an empty table", function()
+      local opens = 0
+      local form = {
+        open = function()
+          opens = opens + 1
+        end,
+      }
+      local deps = setup_with_fixture({ param_form = form })
+      local job = snipai.trigger("sample_snippet", { params = {} })
+      assert.equals(0, opens)
+      assert.truthy(job)
+      assert.equals("generate a widget", deps.runner.spawns[1].prompt)
+    end)
+
+    it("skips the form when the snippet declares no params", function()
+      local opens = 0
+      local form = {
+        open = function()
+          opens = opens + 1
+        end,
+      }
+      local deps = setup_with_fixture({ param_form = form })
+      local job = snipai.trigger("no_params")
+      assert.equals(0, opens)
+      assert.truthy(job)
+      assert.equals("do the thing", deps.runner.spawns[1].prompt)
+    end)
+
+    it("returns nil and spawns no job when the form is cancelled", function()
+      local form = {
+        open = function(_, form_opts)
+          form_opts.on_cancel()
+        end,
+      }
+      local deps = setup_with_fixture({ param_form = form })
+      local job, err = snipai.trigger("sample_snippet")
+      assert.is_nil(job)
+      assert.is_nil(err)
+      assert.equals(0, #deps.runner.spawns)
     end)
   end)
 

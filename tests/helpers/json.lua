@@ -200,6 +200,104 @@ function parse_value(s, i)
   end
 end
 
+-- ---------------------------------------------------------------------------
+-- Encoder (test-only; production uses vim.json.encode)
+--
+-- Sufficient for the shapes our fixtures and specs emit: strings, numbers,
+-- booleans, nil, arrays, objects. An *empty* Lua table is ambiguous — we
+-- default it to {} (object), which is what history-store specs need; if a
+-- future test truly needs an empty array, it should insert a sentinel.
+-- ---------------------------------------------------------------------------
+
+local STRING_ESCAPES = {
+  ["\\"] = "\\\\",
+  ['"'] = '\\"',
+  ["\n"] = "\\n",
+  ["\r"] = "\\r",
+  ["\t"] = "\\t",
+  ["\b"] = "\\b",
+  ["\f"] = "\\f",
+}
+
+local function encode_string(s)
+  local escaped = s:gsub('[\\"%c]', function(c)
+    return STRING_ESCAPES[c] or ("\\u%04x"):format(c:byte())
+  end)
+  return '"' .. escaped .. '"'
+end
+
+local function is_array(t)
+  if next(t) == nil then
+    return false
+  end
+  local n = 0
+  for _ in pairs(t) do
+    n = n + 1
+  end
+  for i = 1, n do
+    if t[i] == nil then
+      return false
+    end
+  end
+  return true
+end
+
+local encode_value
+
+local function encode_array(t)
+  local parts = {}
+  for i = 1, #t do
+    parts[i] = encode_value(t[i])
+  end
+  return "[" .. table.concat(parts, ",") .. "]"
+end
+
+local function encode_object(t)
+  local keys = {}
+  for k in pairs(t) do
+    if type(k) ~= "string" then
+      error(("JSON object key must be a string, got %s"):format(type(k)))
+    end
+    keys[#keys + 1] = k
+  end
+  table.sort(keys) -- deterministic output for tests
+  local parts = {}
+  for _, k in ipairs(keys) do
+    parts[#parts + 1] = encode_string(k) .. ":" .. encode_value(t[k])
+  end
+  return "{" .. table.concat(parts, ",") .. "}"
+end
+
+function encode_value(v)
+  local tv = type(v)
+  if v == nil then
+    return "null"
+  elseif tv == "boolean" then
+    return v and "true" or "false"
+  elseif tv == "number" then
+    if v ~= v or v == math.huge or v == -math.huge then
+      return "null"
+    end
+    return tostring(v)
+  elseif tv == "string" then
+    return encode_string(v)
+  elseif tv == "table" then
+    if is_array(v) then
+      return encode_array(v)
+    end
+    return encode_object(v)
+  end
+  error(("cannot encode value of type %s"):format(tv))
+end
+
+function M.encode(value)
+  local ok, result = pcall(encode_value, value)
+  if not ok then
+    return nil, result
+  end
+  return result
+end
+
 -- Decode a JSON string. Returns (value) on success or (nil, err) on failure.
 function M.decode(str)
   if type(str) ~= "string" then

@@ -288,7 +288,12 @@ require("snipai").setup({
 
   claude = {
     cmd        = "claude",
-    extra_args = {},
+    -- Auto-accept Edit / Write / MultiEdit tool uses in non-interactive
+    -- mode. Without this, `claude -p` silently skips file writes and
+    -- snippets that are supposed to modify files complete with zero
+    -- changes. Override with { "--permission-mode", "plan" } for a
+    -- read-only dry run, or any other Claude CLI flags you want passed.
+    extra_args = { "--permission-mode", "acceptEdits" },
     timeout_ms = 5 * 60 * 1000, -- 5 min per run
   },
 

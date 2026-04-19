@@ -49,7 +49,7 @@ describe("snipai.config", function()
       assert.equals(500, d.history.max_entries)
       assert.is_true(d.history.per_project)
       assert.equals("claude", d.claude.cmd)
-      assert.are.same({}, d.claude.extra_args)
+      assert.are.same({ "--permission-mode", "acceptEdits" }, d.claude.extra_args)
       assert.equals(5 * 60 * 1000, d.claude.timeout_ms)
       assert.equals("auto", d.ui.notify)
       assert.equals("telescope", d.ui.picker)
@@ -88,7 +88,7 @@ describe("snipai.config", function()
       }, TEST_ENV)
       assert.equals("/opt/local/claude", m.claude.cmd)
       assert.equals(1000, m.claude.timeout_ms)
-      assert.are.same({}, m.claude.extra_args) -- untouched
+      assert.are.same({ "--permission-mode", "acceptEdits" }, m.claude.extra_args) -- untouched
     end)
 
     it("deep-merges keymaps", function()

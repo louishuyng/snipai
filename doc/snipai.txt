@@ -253,7 +253,7 @@ defaults shown below: >lua
 
       claude = {
         cmd        = "claude",
-        extra_args = {},
+        extra_args = { "--permission-mode", "acceptEdits" },
         timeout_ms = 5 * 60 * 1000,
       },
 

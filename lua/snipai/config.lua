@@ -64,7 +64,15 @@ function M.defaults(env)
     },
     claude = {
       cmd = "claude",
-      extra_args = {},
+      -- acceptEdits is the right default for a plugin whose whole point
+      -- is AI snippets that edit files. Non-interactive `claude -p` runs
+      -- with permission-mode=default otherwise, which silently skips
+      -- Edit / Write / MultiEdit tool uses because there is nobody to
+      -- approve them. Users who want stricter behaviour can override:
+      --   setup({ claude = { extra_args = { "--permission-mode", "plan" } } })
+      -- `extra_args` is a nested array, so user values REPLACE the
+      -- default outright — pass the full list you want claude to see.
+      extra_args = { "--permission-mode", "acceptEdits" },
       timeout_ms = 5 * 60 * 1000,
     },
     ui = {

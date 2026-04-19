@@ -30,6 +30,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Changed
 - Dropped the hard dependency on `nvchad/volt` in favour of `vim.ui.input` / `vim.ui.select`; users get popup-style prompts automatically when any `dressing.nvim` / `snacks.nvim` / `telescope-ui-select.nvim` override is installed.
 - **BREAKING** (pre-1.0): default snippet location moved from `~/.config/nvim/snipai/snippets.json` to `~/.config/snipai/snippets.json`; default history location moved from `~/.local/share/nvim/snipai/history.jsonl` to `~/.local/share/snipai/history.jsonl`. Snipai now owns its own XDG directories instead of nesting under the Neovim config/data trees. `config.lua` no longer probes `vim.fn.stdpath()` — path resolution is pure XDG (env overrides → `$XDG_{CONFIG,DATA}_HOME` → `$HOME/.config` / `$HOME/.local/share`). Users who relied on the old paths can either `mv` their files or set `config_paths` / `history.path` explicitly in `setup({...})`.
+- Default `claude.extra_args` is now `{ "--permission-mode", "acceptEdits" }` (previously empty). Non-interactive `claude -p` runs under the `default` permission mode otherwise, which silently skips Edit / Write / MultiEdit tool uses because there is nobody to approve them — snippets completed "successfully" but produced no file changes. Override via `setup({ claude = { extra_args = { "--permission-mode", "plan" } } })` for a read-only dry run, or any other Claude CLI flags you want.
 
 ### Fixed
 - _(nothing yet)_

@@ -22,7 +22,7 @@ This document is the map of the codebase. It covers the folder layout, what each
 
 ```
                         ┌──────────────────────────────┐
- nvim-cmp ──► cmp source│     ADAPTERS                 │◄── blink.cmp (phase 5)
+ nvim-cmp ──► cmp source│     ADAPTERS                 │◄── blink.cmp (planned)
  :Snipai* cmds │         │  cmp / blink / commands      │
  keymaps        ─────────►                              │
                         └───────────────┬──────────────┘
@@ -59,10 +59,12 @@ This document is the map of the codebase. It covers the folder layout, what each
 snipai/
 ├── lua/
 │   └── snipai/
-│       ├── init.lua                 -- setup(opts), re-exports, command dispatcher
-│       ├── config.lua               -- defaults + user-opts deep merge, path resolution
+│       ├── init.lua                 -- setup(opts), reload, facades, subscribes job_done
+│       ├── trigger.lua              -- state-pure run(state, name, ctx) dispatcher
+│       ├── statusline.lua           -- animated spinner indicator for statuslines
+│       ├── config.lua               -- defaults + user-opts deep merge, XDG paths
 │       ├── registry.lua             -- load JSON configs, merge, lookup by prefix
-│       ├── snippet.lua              -- Snippet object: validate, render body w/ params
+│       ├── snippet.lua              -- Snippet: validate, render body + insert w/ builtins
 │       ├── params.lua               -- param types (string|text|select|boolean), validation
 │       ├── events.lua               -- small synchronous pub/sub bus
 │       ├── notify.lua               -- notify backend auto-detect + unified API
@@ -70,22 +72,16 @@ snipai/
 │       │   ├── init.lua             -- manager: spawn, list, get, cancel
 │       │   └── job.lua              -- Job state machine + progress accumulator
 │       ├── history/
-│       │   ├── init.lua             -- public API: add, list, get, clear, to_quickfix
+│       │   ├── init.lua             -- public API: add_pending, finalize, list, get, clear
 │       │   └── store.lua            -- JSONL read/append/prune on disk
 │       ├── claude/
 │       │   ├── runner.lua           -- spawn claude CLI via vim.system (DI seam)
-│       │   ├── parser.lua           -- stream-json NDJSON parser (pure function)
-│       │   └── events.lua           -- normalized event shape {kind, payload}
+│       │   └── parser.lua           -- stream-json NDJSON parser (pure function)
 │       ├── ui/
 │       │   ├── popup.lua            -- vim.ui.* facade for typed-field collection
-│       │   ├── param_form.lua       -- snippet-aware form driven by ui.popup
-│       │   └── detail.lua           -- popup showing a single history entry
-│       ├── pickers/
-│       │   ├── running.lua          -- Telescope picker of active jobs
-│       │   └── history.lua          -- Telescope picker of history + qf action
+│       │   └── param_form.lua       -- snippet-aware form driven by ui.popup
 │       └── sources/
-│           ├── cmp.lua              -- nvim-cmp source (phase 1)
-│           └── blink.lua            -- blink.cmp source (phase 5)
+│           └── cmp.lua              -- nvim-cmp source
 │
 ├── plugin/
 │   └── snipai.lua                   -- :Snipai* user commands, default mappings
@@ -94,18 +90,15 @@ snipai/
 │
 ├── tests/
 │   ├── minimal_init.lua             -- headless nvim bootstrap for plenary
-│   ├── helpers/                     -- shared test helpers (tmpdir, fake runner, fixtures)
-│   ├── unit/                        -- pure-Lua unit tests (mirrors lua/ tree)
-│   ├── integration/                 -- end-to-end with fake runner in real nvim
-│   ├── ui/                          -- smoke tests for popups and pickers
+│   ├── helpers/                     -- shared test helpers (json encode/decode, etc.)
+│   ├── unit/                        -- pure-Lua / DI-driven specs (mirrors lua/ tree)
+│   ├── integration/                 -- full-nvim end-to-end (placeholder, none yet)
 │   └── fixtures/
-│       ├── snippets/                -- JSON snippet fixtures
 │       └── claude/                  -- captured stream-json event streams
 │
 ├── scripts/
-│   └── record_fixture.sh            -- capture a new stream-json fixture from real claude
+│   └── smoke.lua                    -- release-time real-CLI smoke runner
 │
-├── .busted                          -- busted config for standalone `busted` runs
 ├── .editorconfig
 ├── .gitignore
 ├── .luarc.json                      -- lua-language-server config
@@ -119,6 +112,8 @@ snipai/
 └── LICENSE
 ```
 
+**Planned but not yet built:** `ui/detail.lua` (history-entry popup), `pickers/running.lua` + `pickers/history.lua` (Telescope pickers), `sources/blink.lua` (blink.cmp adapter). These land in a later release; the file tree above reflects what exists on `main` today.
+
 ---
 
 ## Module responsibilities
@@ -129,12 +124,12 @@ Each file has **one** purpose. If you find yourself reaching for a second one, i
 
 | Module | Exports | Role |
 |---|---|---|
-| `config` | `defaults`, `merge(opts)`, `default_config_paths()` | zero-config-ready default table; deep-merges user opts. Pure; knows nothing about other modules. |
-| `params` | `validate_field(def, value)`, `validate_all(defs, values)`, `resolve_defaults(defs, values)` | typed parameter rules — enforced before a snippet runs. Pure functions only. |
-| `snippet` | `Snippet:validate()`, `Snippet:render(params)` | object model for a single snippet. Renders `{{placeholders}}` against a params table. |
-| `registry` | `load(paths)`, `lookup_prefix(prefix)`, `get(name)`, `all()` | owns the snippet map. Loads JSON, merges by name (later paths win), skips invalids with a warning. |
-| `events` | `new()` (factory) | small synchronous pub/sub bus. Factory-based so each job can own one and tests don't share global state. |
-| `notify` | `info`, `warn`, `error`, `progress(id, opts)` | unified notify API; auto-detects `nvim-notify` / `fidget.nvim` / `vim.notify`. |
+| `config` | `defaults`, `merge(opts, env)`, `default_config_paths(env)` | XDG-pure defaults (`~/.config/snipai`, `~/.local/share/snipai`) + deep-merge of user opts. No Neovim dependency — resolution is injected `env` → `$XDG_*` → `$HOME/.config` and friends. Ships `--permission-mode acceptEdits --setting-sources ""` as the `claude.extra_args` default. |
+| `params` | `validate_definition(def)`, `validate_value(def, value)`, `validate_all(defs, values)`, `resolve_defaults(defs, values)` | typed parameter rules — enforced at load time and submit time. Pure functions only. |
+| `snippet` | `Snippet:validate()`, `Snippet:render(values, ctx?)`, `Snippet:render_insert(values, ctx?)`, `Snippet:matches_filetype(ft)`, `M.RESERVED` | one snippet: validates body + insert + filetype + parameter block; renders `{{placeholders}}` against declared params merged with plugin-supplied built-ins (`cursor_file`, `cursor_line`, `cursor_col`, `cwd`). |
+| `registry` | `load(paths)`, `lookup_prefix(prefix)`, `get(name)`, `all()`, `reload()` | owns the snippet map. Loads JSON, merges by name (later paths win), skips invalids with a warning. |
+| `events` | `new()` (factory) | small synchronous pub/sub bus. Factory-based so each setup owns its own bus and tests don't share global state. |
+| `notify` | `new(opts)` → Notifier with `:notify(msg, level?, opts?)` and `:progress(title, initial?)` returning a Progress handle (`:update`, `:finish`) | unified notify API; auto-detects `nvim-notify` / `fidget.nvim` / `vim.notify`; `require`, `vim.notify`, and `vim.log.levels` are injectable for tests. |
 
 ### Execution (touches processes + filesystem)
 
@@ -154,21 +149,12 @@ Each file has **one** purpose. If you find yourself reaching for a second one, i
 |---|---|---|
 | `ui.popup` | `collect(fields, opts)` | sequential `vim.ui.input` / `vim.ui.select` chain for a list of typed fields; boolean is a two-option select mapped back to Lua booleans; both `vim.ui.*` fns are injectable for tests and alternate backends. |
 | `ui.param_form` | `open(snippet, opts)` | snippet-aware layer: builds an ordered field list from `snippet.parameter`, delegates to `ui.popup`, resolves defaults and validates via `params.validate_all`, surfaces errors through the notifier, guarantees `on_submit` fires only with valid values. |
-| `ui.detail` | `open(history_entry)` | popup showing one history entry: prompt, params, status, duration, `files_changed`, stdout. |
-
-### Pickers (depends on Telescope)
-
-| Module | Exports | Role |
-|---|---|---|
-| `pickers.running` | `open()` | Telescope picker of active jobs; subscribes to `job_progress` for live updates. |
-| `pickers.history` | `open(scope)` | Telescope picker of history, scope = `"project"` or `"all"`; defines `<C-q>` / `<C-r>` / `<C-d>` actions. |
 
 ### Adapters (thin, engine-specific)
 
 | Module | Exports | Role |
 |---|---|---|
-| `sources.cmp` | `new(snipai_api?)`, `register(snipai_api?, cmp_mod?)` | nvim-cmp source. `complete()` maps `registry:lookup_prefix` to cmp items; `insertText` re-inserts the typed prefix on confirm (zero visual change) so `trigger()` can swap the captured range for the rendered `insert` template once the param form submits. `execute()` builds `{buffer, replace_range}` ctx and delegates to `snipai.trigger(name, ctx)`. `register()` resolves cmp via `pcall(require, "cmp")`, is idempotent, returns false when cmp is not installed. |
-| `sources.blink` | blink.cmp source object (phase 5) | same contract, different engine API. |
+| `sources.cmp` | `new(snipai_api?, opts?)`, `register(snipai_api?, cmp_mod?)` | nvim-cmp source. `complete()` maps `registry:lookup_prefix` to cmp items filtered by the current buffer's filetype. `insertText` re-inserts the typed prefix on confirm (zero visual change) so `trigger()` can swap the captured range for the rendered `insert` template once the param form submits. `execute()` builds `{buffer, replace_range}` ctx and delegates to `snipai.trigger(name, ctx)`. `register()` resolves cmp via `pcall(require, "cmp")`, is idempotent, returns false when cmp is not installed. `opts.filetype` is an injectable filetype resolver for tests. |
 
 ### Entry points
 
@@ -204,51 +190,73 @@ The rule is simple: **arrows point downward in the Layers diagram; never upward.
 ## Data flow for one snippet run
 
 ```
-User types "sample_sn" in buffer
+User types "ailua" in buffer
   │
   ▼
-nvim-cmp ─► sources/cmp.lua ─► registry.lookup_prefix() ─► list of Snippet{}
+nvim-cmp ─► sources/cmp.lua ─► registry.lookup_prefix() filtered by
+             vim.bo.filetype ─► list of Snippet{} with insertText=prefix
   │
-  ▼ user selects "sample_snippet"
-sources/cmp.lua :execute() hook ─► snipai.trigger(snippet, ctx)
+  ▼ user confirms; cmp re-inserts the prefix (zero visual change) and
+    calls sources/cmp.lua :execute()
+  ▼
+sources/cmp.lua builds ctx = { buffer, replace_range = [col-#prefix, col] }
   │
-  ▼ does snippet have params AND ctx.params was not supplied?
+  ▼
+snipai.trigger(snippet_name, ctx) ─► trigger.run(state, name, ctx)
+  │
+  ▼ gather_builtins() → ctx.builtins = {
+      cursor_file, cursor_line, cursor_col, cwd
+    }
+  │
+  ▼ refuse if snippet.insert is set AND cursor_file == "" (scratch)
+  │
+  ▼ does snippet declare params AND ctx.params nil?
   │   yes ─► ui/param_form.lua (vim.ui.* chain) ─► resolved values
-  │   no  ─► skip; spawn directly with ctx.params (or {} → defaults)
+  │   no  ─► skip; spawn with ctx.params (or {} → declared defaults)
   ▼
-snippet:render(params)  -> final prompt string
+snippet.insert present?
+  yes ─► snippet:render_insert(values, ctx.builtins)
+         state.place_insert(buffer, replace_range, text)
+         state.save_buffer(buffer)  -- silent :write
+  no  ─► skip buffer steps
+  ▼
+snippet:render(values, ctx.builtins)  -> final prompt string
   │
   ▼
-jobs.spawn(snippet, params, prompt)
-  ├─► history.add_pending(entry)  -- UUID, cwd, timestamp, status="running"
-  ├─► events.emit("job_started", job)
+jobs.spawn(snippet, values, ctx)
+  ├─► Job captures cursor_file for statusline attribution
+  ├─► history.add_pending({ id, cwd, started_at, status="running", ... })
+  ├─► events.emit("job_started", job)  -- statusline spinner starts
   ▼
-claude/runner.spawn(prompt, {output_format="stream-json"})
-  │   vim.system({"claude","-p",prompt,"--output-format","stream-json","--verbose"})
+claude/runner.spawn(prompt, claude_opts)
+  │   vim.system({
+  │     "claude", "-p", prompt,
+  │     "--output-format", "stream-json", "--verbose",
+  │     "--permission-mode", "acceptEdits",
+  │     "--setting-sources", "",
+  │   })
   ▼
 claude/parser.feed(chunk) yields normalized events:
-    {kind="message_start"}
-    {kind="tool_use",  tool="Edit",  path="src/x.ts"}
-    {kind="tool_use",  tool="Write", path="src/x.test.ts"}
+    {kind="system",   subtype="init", model, tools}
+    {kind="tool_use", tool="Edit",  input={file_path=...}}
+    {kind="tool_use", tool="Write", input={file_path=...}}
     {kind="assistant_text", text="..."}
-    {kind="tool_use",  tool="Bash",  command="npm test"}
-    {kind="result",    status="success", usage={...}}
+    {kind="result",   status="success", usage={...}}
   │
-  ▼ job.on_event(evt)
-    • appends to job.progress
-    • records file paths into job.files_changed[]
+  ▼ job:_on_event(evt)
+    • filters Edit/Write/MultiEdit into job.files_changed[] (deduped)
     • events.emit("job_progress", job, evt)
-    • notify backend updates its persistent notification
   │
-  ▼ process exit
-runner ─► events.emit("job_done", job, exit_code)
+  ▼ process exit  ─► job:_on_exit(code, info)
+    • history.finalize(id, { status, duration_ms, files_changed, stderr, ... })
+    • notifier finishes the progress toast
+    • events.emit("job_done", job, exit_code)
   ▼
-history.finalize(entry_id, { status, duration_ms, files_changed, stdout, stderr })
-  ▼
-UI reactions (all subscribers):
-  • notify: "snippet_name ✓ (3 files changed, 4.2s)"
-  • pickers/running.lua: removes entry from live list
-  • pickers/history.lua: new entry shows on next open
+Subscribers fire on job_done:
+  • init.lua → refresh_buffers(files_changed): :checktime per touched
+    buffer so open buffers reload externally-written content
+  • statusline.lua → decrements active_count, stops spinner timer
+    when 0, triggers final :redrawstatus so the indicator clears
 ```
 
 **Invariants to preserve when changing this flow:**
@@ -272,12 +280,16 @@ local unsub = bus:subscribe("job_done", function(job, exit_code) ... end)
 
 | Event | Payload | Emitted by |
 |---|---|---|
-| `job_started` | `job` | `jobs.spawn` |
-| `job_progress` | `job`, `event {kind, ...}` | `jobs.job:on_event` |
-| `job_done` | `job`, `exit_code` | `claude.runner` on process exit |
-| `job_cancelled` | `job` | `jobs.cancel` |
+| `job_started` | `job` | `jobs.job:start` |
+| `job_progress` | `job`, `event {kind, ...}` | `jobs.job:_on_event` |
+| `job_done` | `job`, `exit_code` | `jobs.job:_on_exit` (after `history.finalize`) |
 | `history_added` | `entry` | `history.add_pending` |
 | `history_finalized` | `entry` | `history.finalize` |
+
+**Built-in subscribers** (wired in `init.lua` setup):
+
+- `job_done` → `refresh_buffers(job:files_changed())` — `:checktime` every loaded buffer whose file Claude touched, so in-place edits reload.
+- `job_started` / `job_done` → `statusline.attach` manages the spinner's `active_count` and uv timer.
 
 **Do not add new event names without updating this table AND `doc/snipai.txt`.** The public event surface is documentation, not implementation.
 
@@ -307,9 +319,9 @@ No core change.
 ### Add a new Claude backend (e.g. direct Anthropic API)
 
 1. Create `lua/snipai/claude/runners/<name>.lua` exporting `spawn(prompt, opts, on_event, on_exit)`.
-2. Ensure events emitted match `claude/events.lua`'s shape (`message_start`, `tool_use`, `result`, ...). Translate any backend-specific format into that shape inside the runner.
+2. Ensure events emitted match the normalized shape produced by `claude/parser.lua` (`system`, `assistant_text`, `tool_use`, `tool_result`, `result`). Translate any backend-specific format into that shape inside the runner.
 3. Select the runner from config (e.g. `claude.backend = "api" | "cli"` with CLI as default).
-4. Record a fixture stream from the new backend and add a test in `tests/integration/jobs_spec.lua`.
+4. Record a fixture stream from the new backend and add a test under `tests/unit/jobs/` using the same recording-runner fake pattern.
 
 ### Add a new picker backend (e.g. fzf-lua)
 
@@ -326,7 +338,7 @@ tests/
 ├── minimal_init.lua                  -- bootstraps plenary + plugin in headless nvim
 ├── helpers/
 │   └── json.lua                      -- pure-Lua JSON encode/decode for fixture specs
-├── unit/                             -- pure Lua, no nvim state needed
+├── unit/                             -- pure Lua / DI-driven specs
 │   ├── config_spec.lua
 │   ├── params_spec.lua
 │   ├── snippet_spec.lua
@@ -334,6 +346,7 @@ tests/
 │   ├── events_spec.lua
 │   ├── notify_spec.lua
 │   ├── init_spec.lua
+│   ├── statusline_spec.lua
 │   ├── claude/
 │   │   ├── parser_spec.lua
 │   │   └── runner_spec.lua
@@ -348,7 +361,7 @@ tests/
 │   │   └── param_form_spec.lua
 │   └── sources/
 │       └── cmp_spec.lua
-├── integration/                      -- real nvim APIs + fake runner (when added)
+├── integration/                      -- full-nvim end-to-end (placeholder)
 └── fixtures/
     └── claude/
         └── success_multi.jsonl

@@ -175,6 +175,108 @@ describe("snipai.sources.cmp", function()
     end)
   end)
 
+  describe("Source:complete filetype filter", function()
+    local snippet_mod = require("snipai.snippet")
+    local function make_snip(raw)
+      return snippet_mod.new(raw.name, raw)
+    end
+
+    local function items_in(registry, ft)
+      local s = cmp_source.new(make_fake_snipai({ registry = registry }), {
+        filetype = function()
+          return ft
+        end,
+      })
+      local got
+      s:complete({ context = { cursor_before_line = "" }, offset = 1 }, function(r)
+        got = r
+      end)
+      return got.items
+    end
+
+    it("includes snippets with no filetype constraint in every buffer", function()
+      local registry = make_registry({
+        any = make_snip({ name = "any", prefix = "an", body = "b" }),
+      })
+      assert.equals(1, #items_in(registry, "markdown"))
+      assert.equals(1, #items_in(registry, "lua"))
+      assert.equals(1, #items_in(registry, ""))
+    end)
+
+    it("includes a string-filetype snippet only in a matching buffer", function()
+      local registry = make_registry({
+        lua_only = make_snip({
+          name = "lua_only",
+          prefix = "lu",
+          body = "b",
+          filetype = "lua",
+        }),
+      })
+      assert.equals(1, #items_in(registry, "lua"))
+      assert.equals(0, #items_in(registry, "markdown"))
+    end)
+
+    it("includes an array-filetype snippet in any listed buffer", function()
+      local registry = make_registry({
+        multi = make_snip({
+          name = "multi",
+          prefix = "mu",
+          body = "b",
+          filetype = { "lua", "luau" },
+        }),
+      })
+      assert.equals(1, #items_in(registry, "lua"))
+      assert.equals(1, #items_in(registry, "luau"))
+      assert.equals(0, #items_in(registry, "markdown"))
+    end)
+
+    it("mixes filtered and unfiltered snippets in a single buffer", function()
+      local registry = make_registry({
+        any = make_snip({ name = "any", prefix = "an", body = "b" }),
+        lua_only = make_snip({
+          name = "lua_only",
+          prefix = "lu",
+          body = "b",
+          filetype = "lua",
+        }),
+        md_only = make_snip({
+          name = "md_only",
+          prefix = "md",
+          body = "b",
+          filetype = "markdown",
+        }),
+      })
+      local names = {}
+      for _, item in ipairs(items_in(registry, "lua")) do
+        names[#names + 1] = item.label
+      end
+      table.sort(names)
+      assert.are.same({ "any", "lua_only" }, names)
+    end)
+
+    it("defaults to vim.bo.filetype when no resolver is injected", function()
+      -- In the headless test env we have access to vim; pin a filetype
+      -- on the current buffer and assert the built-in path observes it.
+      local saved = vim.bo.filetype
+      vim.bo.filetype = "lua"
+      local registry = make_registry({
+        lua_only = make_snip({
+          name = "lua_only",
+          prefix = "lu",
+          body = "b",
+          filetype = "lua",
+        }),
+      })
+      local s = cmp_source.new(make_fake_snipai({ registry = registry }))
+      local got
+      s:complete({ context = { cursor_before_line = "" }, offset = 1 }, function(r)
+        got = r
+      end)
+      vim.bo.filetype = saved
+      assert.equals(1, #got.items)
+    end)
+  end)
+
   describe("Source:execute", function()
     it("delegates to snipai.trigger with the selected snippet name", function()
       local fake = make_fake_snipai({ registry = make_registry({}) })

@@ -29,6 +29,31 @@ local function extract_placeholders(body)
   return names
 end
 
+-- A snippet's `filetype` field may be:
+--   * nil                  — no filetype constraint
+--   * a non-empty string   — single filetype ("lua")
+--   * a non-empty array of non-empty strings — any-of list
+local function validate_filetype(ft)
+  if type(ft) == "string" then
+    if ft == "" then
+      return false, "filetype string must be non-empty"
+    end
+    return true
+  end
+  if type(ft) == "table" then
+    if #ft == 0 then
+      return false, "filetype array must be non-empty"
+    end
+    for i, v in ipairs(ft) do
+      if type(v) ~= "string" or v == "" then
+        return false, ("filetype[%d] must be a non-empty string"):format(i)
+      end
+    end
+    return true
+  end
+  return false, ("filetype must be a string or array of strings, got %s"):format(type(ft))
+end
+
 -- ---------------------------------------------------------------------------
 -- Snippet class
 -- ---------------------------------------------------------------------------
@@ -46,6 +71,7 @@ function M.new(name, raw)
     prefix = raw.prefix,
     body = raw.body,
     parameter = raw.parameter or {},
+    filetype = raw.filetype,
   }, Snippet)
 end
 
@@ -58,6 +84,13 @@ function Snippet:validate()
   end
   if type(self.parameter) ~= "table" then
     return false, "parameter must be a table"
+  end
+
+  if self.filetype ~= nil then
+    local ok_ft, err_ft = validate_filetype(self.filetype)
+    if not ok_ft then
+      return false, err_ft
+    end
   end
 
   for param_name, def in pairs(self.parameter) do
@@ -77,6 +110,24 @@ function Snippet:validate()
   end
 
   return true
+end
+
+-- Returns true when the snippet has no filetype constraint, or when the
+-- supplied filetype matches one of the declared values. `ft` is the
+-- buffer filetype the caller is testing against (usually vim.bo.filetype).
+function Snippet:matches_filetype(ft)
+  if self.filetype == nil then
+    return true
+  end
+  if type(self.filetype) == "string" then
+    return self.filetype == ft
+  end
+  for _, candidate in ipairs(self.filetype) do
+    if candidate == ft then
+      return true
+    end
+  end
+  return false
 end
 
 function Snippet:render(values)

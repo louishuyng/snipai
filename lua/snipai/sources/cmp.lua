@@ -57,6 +57,15 @@ local function extract_query(params)
   return before:match("[%w_]+$") or ""
 end
 
+-- Resolve the current buffer's filetype for filter decisions. Split out
+-- so tests can inject a deterministic value without touching vim.bo.
+local function default_current_filetype()
+  if vim and vim.bo and vim.bo.filetype then
+    return vim.bo.filetype
+  end
+  return ""
+end
+
 -- ---------------------------------------------------------------------------
 -- Source class
 -- ---------------------------------------------------------------------------
@@ -64,10 +73,15 @@ end
 local Source = {}
 Source.__index = Source
 
-function M.new(snipai_api)
+-- new(snipai_api?, opts?)
+--   opts.filetype -- function returning the buffer filetype (test seam;
+--                    defaults to a vim.bo.filetype probe).
+function M.new(snipai_api, opts)
   snipai_api = snipai_api or require("snipai")
+  opts = opts or {}
   return setmetatable({
     _snipai = snipai_api,
+    _current_filetype = opts.filetype or default_current_filetype,
   }, Source)
 end
 
@@ -94,9 +108,16 @@ function Source:complete(params, callback)
     return
   end
   local query = extract_query(params)
+  local ft = self._current_filetype() or ""
   local items = {}
   for _, snippet in ipairs(state.registry:lookup_prefix(query)) do
-    items[#items + 1] = to_item(snippet)
+    local matches = true
+    if type(snippet.matches_filetype) == "function" then
+      matches = snippet:matches_filetype(ft)
+    end
+    if matches then
+      items[#items + 1] = to_item(snippet)
+    end
   end
   callback({ items = items, isIncomplete = false })
 end

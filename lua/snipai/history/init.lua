@@ -63,6 +63,10 @@ local function default_cwd()
   return "."
 end
 
+local function default_setqflist(items, action, what)
+  return vim.fn.setqflist(items, action, what)
+end
+
 local TERMINAL_STATUSES = { success = true, error = true, cancelled = true }
 
 -- ---------------------------------------------------------------------------
@@ -92,6 +96,7 @@ function M.new(opts)
     _now = opts.now or default_now,
     _cwd = opts.cwd or default_cwd(),
     _per_project = opts.per_project ~= false, -- default true
+    _setqflist = opts.setqflist or default_setqflist,
   }, History)
 end
 
@@ -237,6 +242,42 @@ end
 
 function History:cwd()
   return self._cwd
+end
+
+-- Push an entry's files_changed into the quickfix list. Each touched file
+-- becomes one qf item pointing at line 1 (Claude's Edit events don't
+-- carry line numbers; row 1 is the least-surprising landing point). The
+-- qf title names the snippet so multiple runs can coexist visually.
+--
+-- Returns the items list that was pushed, or nil + error if the entry is
+-- missing or had no file writes. opts.action overrides the setqflist
+-- action character (defaults to " ", meaning create a fresh list).
+function History:to_quickfix(id, opts)
+  opts = opts or {}
+  if type(id) ~= "string" or id == "" then
+    return nil, "to_quickfix requires a non-empty id"
+  end
+  local entry = self:get(id)
+  if not entry then
+    return nil, ("entry not found: %s"):format(id)
+  end
+  local files = entry.files_changed or {}
+  if #files == 0 then
+    return nil, ("no file changes recorded for entry %s"):format(id)
+  end
+
+  local items = {}
+  for _, path in ipairs(files) do
+    items[#items + 1] = {
+      filename = path,
+      lnum = 1,
+      col = 1,
+      text = entry.snippet or "snipai",
+    }
+  end
+  local title = ("snipai: %s"):format(entry.snippet or id)
+  self._setqflist({}, opts.action or " ", { title = title, items = items })
+  return items
 end
 
 return M

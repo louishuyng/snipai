@@ -256,6 +256,11 @@ function M.history.clear()
   return state.history:clear()
 end
 
+function M.history.to_quickfix(id)
+  ensure_initialized()
+  return state.history:to_quickfix(id)
+end
+
 -- ---------------------------------------------------------------------------
 -- Exposed for plugin/snipai.lua command completion and tests.
 -- ---------------------------------------------------------------------------

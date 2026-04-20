@@ -69,8 +69,17 @@ local function new_history(opts)
     now = opts.now or fake_clock(),
     cwd = opts.cwd or "/work/proj",
     per_project = opts.per_project,
+    setqflist = opts.setqflist,
   })
   return h, fs
+end
+
+local function capture_qflist()
+  local calls = {}
+  return function(items, action, what)
+    calls[#calls + 1] = { items = items, action = action, what = what }
+  end,
+    calls
 end
 
 describe("snipai.history", function()
@@ -308,6 +317,83 @@ describe("snipai.history", function()
       h:clear()
       assert.is_nil(fs._files["/history.jsonl"])
       assert.are.same({}, h:list({ scope = "all" }))
+    end)
+  end)
+
+  describe("to_quickfix", function()
+    local function seed_success(h, files, snippet)
+      local e = h:add_pending({ snippet = snippet or "s" })
+      h:finalize(e.id, { status = "success", files_changed = files })
+      return e.id
+    end
+
+    it("pushes one qf item per files_changed with snippet-named title", function()
+      local set, calls = capture_qflist()
+      local h = new_history({ setqflist = set })
+      local id = seed_success(h, { "src/a.ts", "src/a.test.ts" }, "scaffold")
+
+      local items, err = h:to_quickfix(id)
+      assert.is_nil(err)
+      assert.equals(2, #items)
+      assert.equals("src/a.ts", items[1].filename)
+      assert.equals(1, items[1].lnum)
+      assert.equals(1, items[1].col)
+      assert.equals("scaffold", items[1].text)
+
+      assert.equals(1, #calls)
+      local call = calls[1]
+      assert.are.same({}, call.items)
+      assert.equals(" ", call.action)
+      assert.equals("snipai: scaffold", call.what.title)
+      assert.equals(2, #call.what.items)
+      assert.equals("src/a.test.ts", call.what.items[2].filename)
+    end)
+
+    it("honors an opts.action override", function()
+      local set, calls = capture_qflist()
+      local h = new_history({ setqflist = set })
+      local id = seed_success(h, { "x" })
+      h:to_quickfix(id, { action = "a" })
+      assert.equals("a", calls[1].action)
+    end)
+
+    it("rejects an empty or non-string id", function()
+      local h = new_history()
+      local ok1, err1 = h:to_quickfix("")
+      assert.is_nil(ok1)
+      assert.matches("non%-empty id", err1)
+      local ok2, err2 = h:to_quickfix(nil)
+      assert.is_nil(ok2)
+      assert.matches("non%-empty id", err2)
+    end)
+
+    it("returns nil+err when the id is not found", function()
+      local set, calls = capture_qflist()
+      local h = new_history({ setqflist = set })
+      local ok, err = h:to_quickfix("missing")
+      assert.is_nil(ok)
+      assert.matches("not found", err)
+      assert.equals(0, #calls)
+    end)
+
+    it("returns nil+err when the entry has no files_changed", function()
+      local set, calls = capture_qflist()
+      local h = new_history({ setqflist = set })
+      local id = seed_success(h, {})
+      local ok, err = h:to_quickfix(id)
+      assert.is_nil(ok)
+      assert.matches("no file changes", err)
+      assert.equals(0, #calls)
+    end)
+
+    it("still works when the entry has no snippet name", function()
+      local set, calls = capture_qflist()
+      local h = new_history({ setqflist = set })
+      local e = h:add_pending({}) -- no snippet field
+      h:finalize(e.id, { status = "success", files_changed = { "f" } })
+      local items = h:to_quickfix(e.id)
+      assert.equals("snipai", items[1].text)
+      assert.matches("snipai:", calls[1].what.title)
     end)
   end)
 

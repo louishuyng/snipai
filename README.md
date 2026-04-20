@@ -42,7 +42,7 @@ https://github.com/user-attachments/assets/954707ca-6d79-4727-b02b-688b1c237a4a
 - **Filetype scoping.** Optional `filetype` field keeps language-specific snippets out of other buffers.
 - **Concurrent runs** with per-job notifications and spinner.
 - **Persistent history.** JSONL log per project, survives restarts.
-- **Streaming progress.** Parsed from Claude's `stream-json` output — no scraping.
+- **Structured progress.** File changes and tool uses are parsed from Claude's `stream-json` output — no stdout scraping. A live tool-use counter inside the notification is scheduled for v0.2.0; today the run emits a single completion toast.
 - **Quickfix integration** for any past run's file changes.
 - **Completion via nvim-cmp**; blink.cmp adapter on the roadmap.
 - **Telescope pickers** for active jobs and history.

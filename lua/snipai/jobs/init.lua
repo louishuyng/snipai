@@ -37,6 +37,12 @@ function M.new(opts)
     _id = opts.id,
     _job_factory = opts.job_factory or job_mod.new,
     _active = {},
+    -- Terminal buffers outlive the active set: once a session ends the
+    -- Job leaves _active, but Neovim keeps the terminal buffer showing
+    -- the final transcript. Detail popup uses this map to attach the
+    -- Terminal tab to a completed / cancelled session so the user can
+    -- scroll the conversation and (later) claude --resume it.
+    _terminal_bufs = {},
   }, Manager)
 end
 
@@ -63,11 +69,17 @@ function Manager:spawn(snippet, params, ctx)
   })
 
   -- Subscribe BEFORE start so a synchronous on_exit (fake runner in tests)
-  -- still triggers auto-removal.
+  -- still triggers auto-removal. Also snapshot the terminal buffer so
+  -- get_terminal_buf(id) keeps returning it after the job exits.
   local unsub
+  local mgr = self
   unsub = self._events:subscribe("job_done", function(done_job)
     if done_job == job then
-      self._active[job:id()] = nil
+      local tb = type(job.terminal_buf) == "function" and job:terminal_buf() or nil
+      if tb and vim.api and vim.api.nvim_buf_is_valid(tb) then
+        mgr._terminal_bufs[job:id()] = tb
+      end
+      mgr._active[job:id()] = nil
       if unsub then
         unsub()
         unsub = nil
@@ -116,16 +128,25 @@ function Manager:cancel(id)
   return job:cancel()
 end
 
--- Returns the PTY terminal buffer for an active job, or nil if the
--- runner backend did not produce one (test fakes, or a job already
--- moved out of the active set on job_done).
+-- Returns the PTY terminal buffer for a job, whether active or
+-- finished. A session's transcript stays reachable after the PTY
+-- exits so the user can scroll it and (eventually) claude --resume
+-- from the same history row.
 function Manager:get_terminal_buf(id)
   local job = self._active[id]
-  if not job then
-    return nil
+  if job and type(job.terminal_buf) == "function" then
+    local b = job:terminal_buf()
+    if b and vim.api and vim.api.nvim_buf_is_valid(b) then
+      return b
+    end
   end
-  if type(job.terminal_buf) == "function" then
-    return job:terminal_buf()
+  local buf = self._terminal_bufs[id]
+  if buf and vim.api and vim.api.nvim_buf_is_valid(buf) then
+    return buf
+  end
+  -- Stale entry (user :bd!'d the buffer); drop it.
+  if buf then
+    self._terminal_bufs[id] = nil
   end
   return nil
 end

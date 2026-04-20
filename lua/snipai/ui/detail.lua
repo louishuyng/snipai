@@ -242,14 +242,19 @@ end
 -- Builds the summary scratch buffer used as the first tab in
 -- ui.detail_tabs. Kept here so the pure renderer and the buffer-
 -- construction live in one place.
-function M.build_summary_buf(entry, api)
+--
+-- opts.bufhidden overrides the default ("wipe") — ui.detail_tabs uses
+-- "hide" so tabbing between Summary and Terminal doesn't blow the
+-- buffer away the moment a window stops showing it.
+function M.build_summary_buf(entry, api, opts)
   api = api or vim.api
+  opts = opts or {}
   local rendered = M.render(entry)
   local buf = api.nvim_create_buf(false, true)
   api.nvim_buf_set_lines(buf, 0, -1, false, rendered.lines)
   api.nvim_buf_set_option(buf, "modifiable", false)
   api.nvim_buf_set_option(buf, "readonly", true)
-  api.nvim_buf_set_option(buf, "bufhidden", "wipe")
+  api.nvim_buf_set_option(buf, "bufhidden", opts.bufhidden or "wipe")
   api.nvim_buf_set_option(buf, "filetype", "markdown")
   return buf, rendered
 end

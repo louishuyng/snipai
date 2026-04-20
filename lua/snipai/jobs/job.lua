@@ -273,7 +273,9 @@ function Job:start()
 end
 
 function Job:cancel()
-  if self._status ~= "running" then
+  -- Idle sessions are still live (the PTY is alive, Claude is just
+  -- waiting for the next message) so they are legitimately cancellable.
+  if self._status ~= "running" and self._status ~= "idle" then
     return false
   end
   if self._handle and type(self._handle.cancel) == "function" then

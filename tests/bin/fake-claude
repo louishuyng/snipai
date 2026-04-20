@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Minimal `claude` stand-in for integration tests.
+#
+# Honors --session-id <uuid> and --name <label>, writes a deterministic
+# session JSONL transcript under $HOME/.claude/projects/<cwd-slug>/,
+# reads stdin for the initial prompt plus follow-up turns, and exits 0
+# on SIGTERM or EOF. Every other `claude` flag (--permission-mode,
+# --setting-sources, --model, …) is swallowed so the runner's default
+# extra_args don't break parsing.
+
+set -eu
+
+SESSION_ID=
+NAME=
+PROMPT_FROM_CLI=
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --session-id) SESSION_ID="$2"; shift 2 ;;
+    --name) NAME="$2"; shift 2 ;;
+    --permission-mode|--setting-sources|--model|--system-prompt|--effort|--agent) shift 2 ;;
+    -p|--print) PROMPT_FROM_CLI="$2"; shift 2 ;;
+    --fork-session|--resume|--continue|--tmux|--worktree|--no-session-persistence) shift ;;
+    *) shift ;;
+  esac
+done
+
+if [[ -z "$SESSION_ID" ]]; then
+  echo "fake-claude: missing --session-id" >&2
+  exit 2
+fi
+
+CWD_SLUG=$(pwd | sed 's|/|-|g')
+TRANSCRIPT_DIR="${HOME}/.claude/projects/${CWD_SLUG}"
+TRANSCRIPT="${TRANSCRIPT_DIR}/${SESSION_ID}.jsonl"
+mkdir -p "$TRANSCRIPT_DIR"
+
+emit_json() {
+  printf '%s\n' "$1" >> "$TRANSCRIPT"
+}
+
+json_escape() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  printf '%s' "$s"
+}
+
+run_turn() {
+  local prompt=$1
+  local escaped
+  escaped=$(json_escape "$prompt")
+  emit_json "{\"type\":\"assistant\",\"content\":\"acking: ${escaped}\"}"
+  emit_json '{"type":"tool_use","id":"tu_1","name":"Edit","input":{"file_path":"/tmp/fake-claude-touched.txt"}}'
+  emit_json '{"type":"result","subtype":"success","is_error":false,"duration_ms":42}'
+  echo "fake-claude: turn done"
+}
+
+trap 'exit 0' TERM INT
+
+if [[ -n "$PROMPT_FROM_CLI" ]]; then
+  run_turn "$PROMPT_FROM_CLI"
+  exit 0
+fi
+
+# Interactive mode: read the initial prompt (sent via chansend), then loop.
+if IFS= read -r PROMPT; then
+  run_turn "$PROMPT"
+fi
+
+while IFS= read -r LINE; do
+  if [[ "$LINE" == "/exit" ]]; then
+    exit 0
+  fi
+  run_turn "$LINE"
+done

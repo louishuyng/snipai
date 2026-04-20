@@ -139,6 +139,9 @@ local function build_test_setup(overrides)
     refresh_buffers = overrides.refresh_buffers or function() end,
     reader = overrides.reader,
     json_decode = overrides.json_decode or json.decode,
+    -- Swallow keymap installation during tests so setup() doesn't
+    -- leak global <leader>sr/sh/sH bindings into other specs.
+    keymap_set = overrides.keymap_set or function() end,
   }
 
   local opts = {

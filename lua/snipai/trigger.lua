@@ -21,6 +21,42 @@
 
 local M = {}
 
+-- ---------------------------------------------------------------------------
+-- Neovim-side defaults (moved here from init.lua — these are the trigger's
+-- only vim-api touchpoints, not something the top-level composer should know
+-- about). Each can be overridden per-invocation via state.<name>; tests use
+-- that hook. Production code leaves state.<name> nil and we fall back to
+-- these.
+-- ---------------------------------------------------------------------------
+
+local function default_gather_builtins()
+  local cursor = vim.api.nvim_win_get_cursor(0)
+  return {
+    cursor_file = vim.api.nvim_buf_get_name(0),
+    cursor_line = cursor[1],
+    cursor_col = cursor[2] + 1,
+    cwd = vim.fn.getcwd(),
+  }
+end
+
+local function default_place_insert(buffer, range, text)
+  local lines = vim.split(text, "\n", { plain = true })
+  vim.api.nvim_buf_set_text(
+    buffer,
+    range.start.row,
+    range.start.col,
+    range["end"].row,
+    range["end"].col,
+    lines
+  )
+end
+
+local function default_save_buffer(buffer)
+  vim.api.nvim_buf_call(buffer, function()
+    vim.cmd("silent write")
+  end)
+end
+
 local function resolve_snippet(state, name_or_snippet)
   if type(name_or_snippet) == "table" then
     return name_or_snippet
@@ -79,8 +115,10 @@ local function apply_insert(state, snippet, values, ctx)
       or { row = 0, col = 0 }
     range = { start = cursor, ["end"] = cursor }
   end
-  state.place_insert(ctx.buffer, range, text)
-  state.save_buffer(ctx.buffer)
+  local place = state.place_insert or default_place_insert
+  local save = state.save_buffer or default_save_buffer
+  place(ctx.buffer, range, text)
+  save(ctx.buffer)
   return true
 end
 
@@ -109,7 +147,8 @@ function M.run(state, name_or_snippet, ctx)
   -- col reflect where the user was when they picked the snippet — not
   -- where they end up after the param form steals focus.
   if ctx.builtins == nil then
-    ctx.builtins = state.gather_builtins()
+    local gather = state.gather_builtins or default_gather_builtins
+    ctx.builtins = gather()
   end
 
   local ok, refuse_err = refuse_if_no_file(snippet, ctx.builtins)

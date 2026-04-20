@@ -100,6 +100,7 @@ local function setup()
       place_insert = function() end,
       save_buffer = function() end,
       refresh_buffers = function() end,
+      keymap_set = function() end,
     },
   })
   return runner

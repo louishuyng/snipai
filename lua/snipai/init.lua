@@ -3,25 +3,26 @@
 --
 -- setup(opts) resolves config defaults, constructs the event bus,
 -- notifier, history, registry, and jobs manager, loads snippet
--- configs, wires the job_done -> buffer-refresh subscription, and
--- stashes everything in a module-local state table. Subsequent
--- setup() calls rebuild state.
+-- configs, wires the statusline spinner + buffer-refresh subscribers,
+-- installs default keymaps, and stashes everything in a module-local
+-- state table. Subsequent setup() calls rebuild state.
+--
+-- This file intentionally stays composition-only: Neovim-side defaults
+-- for trigger live in snipai.trigger; the job_done → :checktime
+-- subscription lives in snipai.buffer_refresh.attach.
 --
 -- Public surface:
 --   snipai.setup(opts?)
 --   snipai.trigger(name_or_snippet, ctx?)   -- delegates to snipai.trigger.run
 --   snipai.reload()
 --   snipai.jobs.list() / get(id) / cancel(id) / cancel_all()
---   snipai.history.list({scope}) / get(id) / clear()
---
--- Statusline integration lives in snipai.statusline (snipai.statusline.status).
--- Trigger dispatch (insert + auto-save + form + spawn) lives in snipai.trigger.
+--   snipai.history.list({scope}) / get(id) / clear() / to_quickfix(id)
 --
 -- Testing: pass opts._deps to inject any or all of { env, events,
 -- notify, history, registry, jobs, runner, reader, json_decode,
 -- param_form, gather_builtins, place_insert, save_buffer,
--- refresh_buffers }. Not part of the public API; leading underscore
--- signals internal.
+-- refresh_buffers, keymap_set }. Not part of the public API; leading
+-- underscore signals internal.
 
 local config = require("snipai.config")
 local events_mod = require("snipai.events")
@@ -32,64 +33,8 @@ local jobs_mod = require("snipai.jobs")
 local param_form_mod = require("snipai.ui.param_form")
 local trigger_mod = require("snipai.trigger")
 local statusline_mod = require("snipai.statusline")
-
--- ---------------------------------------------------------------------------
--- Built-in context + buffer helpers (injectable via _deps for tests)
--- ---------------------------------------------------------------------------
-
-local function default_gather_builtins()
-  local cursor = vim.api.nvim_win_get_cursor(0)
-  return {
-    cursor_file = vim.api.nvim_buf_get_name(0),
-    cursor_line = cursor[1],
-    cursor_col = cursor[2] + 1,
-    cwd = vim.fn.getcwd(),
-  }
-end
-
-local function default_place_insert(buffer, range, text)
-  local lines = vim.split(text, "\n", { plain = true })
-  vim.api.nvim_buf_set_text(
-    buffer,
-    range.start.row,
-    range.start.col,
-    range["end"].row,
-    range["end"].col,
-    lines
-  )
-end
-
-local function default_save_buffer(buffer)
-  vim.api.nvim_buf_call(buffer, function()
-    vim.cmd("silent write")
-  end)
-end
-
--- Why this exists: Claude's Edit / Write tools land on disk, but Neovim
--- does not auto-reload open buffers pointing at those files — they keep
--- showing the pre-Claude content until the user hits :e!. :checktime
--- per touched file makes the enrichment visible immediately. Buffers
--- whose file Claude never touched, and files the user never opened,
--- are skipped — nothing to reload in either case.
-local function default_refresh_buffers(files_changed)
-  if files_changed == nil or #files_changed == 0 then
-    return
-  end
-  local touched = {}
-  for _, path in ipairs(files_changed) do
-    touched[path] = true
-  end
-  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-    if vim.api.nvim_buf_is_loaded(buf) then
-      local name = vim.api.nvim_buf_get_name(buf)
-      if name ~= "" and touched[name] then
-        vim.api.nvim_buf_call(buf, function()
-          vim.cmd("silent! checktime")
-        end)
-      end
-    end
-  end
-end
+local keymaps_mod = require("snipai.keymaps")
+local buffer_refresh_mod = require("snipai.buffer_refresh")
 
 local M = {}
 
@@ -108,7 +53,6 @@ local state = {
   gather_builtins = nil,
   place_insert = nil,
   save_buffer = nil,
-  refresh_buffers = nil,
   _initialized = false,
 }
 
@@ -167,25 +111,24 @@ function M.setup(opts)
   state.registry = registry
   state.jobs = jobs
   state.param_form = deps.param_form or param_form_mod
-  state.gather_builtins = deps.gather_builtins or default_gather_builtins
-  state.place_insert = deps.place_insert or default_place_insert
-  state.save_buffer = deps.save_buffer or default_save_buffer
-  state.refresh_buffers = deps.refresh_buffers or default_refresh_buffers
+  -- Trigger-side hooks pipe straight through; nil triggers trigger.lua's
+  -- own defaults. No need for this module to know about cursor, buffer
+  -- edits, or file save.
+  state.gather_builtins = deps.gather_builtins
+  state.place_insert = deps.place_insert
+  state.save_buffer = deps.save_buffer
   state._initialized = true
 
-  -- Subscribe once: every finished job hands its files_changed list to
-  -- the refresh step so open buffers reload from disk after Claude's
-  -- Edit / Write land. Each setup() call binds to a fresh events bus,
-  -- so dropping the previous subscription is unnecessary.
-  events:subscribe("job_done", function(job)
-    local files = job and type(job.files_changed) == "function" and job:files_changed() or {}
-    state.refresh_buffers(files)
-  end)
-
-  -- Statusline spinner subscribes to the same bus; it manages its own
-  -- active-count + timer lifecycle so the indicator appears the instant
-  -- a job starts and clears the moment the last one finishes.
+  -- Each setup() rebuilds subscribers against the fresh events bus.
+  buffer_refresh_mod.attach(events, deps.refresh_buffers)
   statusline_mod.attach(events)
+
+  -- Default <leader>sr / <leader>sh / <leader>sH mappings. Skipped
+  -- entirely if setup({ keymaps = false }); individual keys can be
+  -- turned off via setup({ keymaps = { running = false } }). A repeat
+  -- setup() call re-applies — vim.keymap.set overwrites the previous
+  -- binding for the same lhs, so no cleanup needed.
+  keymaps_mod.apply(merged.keymaps, { keymap_set = deps.keymap_set })
 
   return M
 end
@@ -279,7 +222,6 @@ function M._reset()
   state.gather_builtins = nil
   state.place_insert = nil
   state.save_buffer = nil
-  state.refresh_buffers = nil
   state._initialized = false
 end
 

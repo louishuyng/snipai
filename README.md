@@ -343,8 +343,14 @@ require("snipai").setup({
     -- --setting-sources "": skip plugin bootstrap (~2–3× faster; keeps
     -- keychain auth, memory, CLAUDE.md, and MCP servers working).
     -- extra_args is a nested array — your value REPLACES this default.
-    extra_args = { "--permission-mode", "acceptEdits", "--setting-sources", "" },
-    timeout_ms = 5 * 60 * 1000,
+    extra_args       = { "--permission-mode", "acceptEdits", "--setting-sources", "" },
+    timeout_ms       = 5 * 60 * 1000,
+    -- Claude Code's Ink-based TUI needs a moment to render before it
+    -- reliably accepts input. snipai defers the initial prompt chansend
+    -- by this many milliseconds. Raise if your machine is slow or the
+    -- prompt text lands without submitting; lower to 0 to send
+    -- synchronously (useful for test / non-TUI backends).
+    prompt_delay_ms  = 500,
   },
 
   ui = {

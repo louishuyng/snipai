@@ -81,6 +81,7 @@ function M.spawn(prompt, opts, on_event, on_exit)
     claude_cmd = opts.cmd,
     extra_args = opts.extra_args or {},
     primitives = opts.term_primitives,
+    prompt_delay_ms = opts.prompt_delay_ms,
     on_exit = function(code, info)
       if finished then
         return

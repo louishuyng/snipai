@@ -4,6 +4,8 @@
 
 local M = {}
 
+local DEFAULT_PROMPT_DELAY_MS = 500
+
 local function default_primitives()
   return {
     create_buf = function()
@@ -20,6 +22,9 @@ local function default_primitives()
     end,
     jobstop = function(job)
       return vim.fn.jobstop(job)
+    end,
+    defer_fn = function(fn, ms)
+      return vim.defer_fn(fn, ms)
     end,
   }
 end
@@ -95,7 +100,33 @@ function M.spawn(opts)
   end)
   handle._job_id = job_id
 
-  p.chansend(job_id, opts.prompt .. "\r")
+  -- Real `claude` boots an Ink-based TUI that needs ~hundreds of ms to
+  -- render before it reliably accepts input. If we chansend the prompt
+  -- + CR synchronously here, the trailing CR lands during init and gets
+  -- swallowed — the prompt sits in the input box until the user presses
+  -- Enter manually. Split into two deferred sends so the text settles,
+  -- then the submit goes in cleanly. Tests pass 0 to keep the flow
+  -- synchronous.
+  local delay_ms = opts.prompt_delay_ms
+  if delay_ms == nil then
+    delay_ms = DEFAULT_PROMPT_DELAY_MS
+  end
+  if delay_ms <= 0 then
+    p.chansend(job_id, opts.prompt .. "\r")
+  else
+    p.defer_fn(function()
+      if handle._done or handle._cancelled then
+        return
+      end
+      p.chansend(job_id, opts.prompt)
+      p.defer_fn(function()
+        if handle._done or handle._cancelled then
+          return
+        end
+        p.chansend(job_id, "\r")
+      end, math.max(50, math.floor(delay_ms / 2)))
+    end, delay_ms)
+  end
   return handle
 end
 

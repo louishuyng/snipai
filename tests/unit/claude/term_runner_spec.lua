@@ -29,21 +29,35 @@ local function fake_primitives()
       rec.jobstop_calls = rec.jobstop_calls + 1
       rec.jobstop_arg = job
     end,
+    defer_fn = function(fn, _ms)
+      -- Synchronous defer for tests; we assert chansend effects inline.
+      fn()
+    end,
   }
   return rec
+end
+
+-- Tests default to prompt_delay_ms = 0 so the fake chansend is called
+-- synchronously; the real TUI delay is exercised via integration tests.
+local function spawn_sync(p, overrides)
+  local o = {
+    prompt = "hello",
+    session_id = "11111111-1111-1111-1111-111111111111",
+    snippet_name = "greet",
+    prompt_delay_ms = 0,
+    on_exit = function() end,
+    primitives = p.fns,
+  }
+  for k, v in pairs(overrides or {}) do
+    o[k] = v
+  end
+  return term_runner.spawn(o)
 end
 
 describe("snipai.claude.term_runner", function()
   it("creates a scratch buffer, termopens claude, and sends the prompt", function()
     local p = fake_primitives()
-    local handle = term_runner.spawn({
-      prompt = "hello",
-      session_id = "11111111-1111-1111-1111-111111111111",
-      snippet_name = "greet",
-      extra_args = { "--permission-mode", "acceptEdits" },
-      on_exit = function() end,
-      primitives = p.fns,
-    })
+    local handle = spawn_sync(p, { extra_args = { "--permission-mode", "acceptEdits" } })
     assert.equals(1, p.create_buf_calls)
     assert.are.same({
       "claude",
@@ -63,26 +77,13 @@ describe("snipai.claude.term_runner", function()
 
   it("honors opts.claude_cmd", function()
     local p = fake_primitives()
-    term_runner.spawn({
-      prompt = "x",
-      session_id = "sid",
-      snippet_name = "s",
-      claude_cmd = "/opt/claude",
-      on_exit = function() end,
-      primitives = p.fns,
-    })
+    spawn_sync(p, { prompt = "x", session_id = "sid", snippet_name = "s", claude_cmd = "/opt/claude" })
     assert.equals("/opt/claude", p.termopen_args[1])
   end)
 
   it("cancel() calls jobstop once and flips is_cancelled", function()
     local p = fake_primitives()
-    local h = term_runner.spawn({
-      prompt = "x",
-      session_id = "sid",
-      snippet_name = "s",
-      on_exit = function() end,
-      primitives = p.fns,
-    })
+    local h = spawn_sync(p, { prompt = "x", session_id = "sid", snippet_name = "s" })
     assert.is_false(h:is_cancelled())
     assert.is_true(h:cancel())
     assert.equals(1, p.jobstop_calls)
@@ -95,40 +96,61 @@ describe("snipai.claude.term_runner", function()
 
   it("fires on_exit with cancelled=true when termopen's on_exit runs after cancel", function()
     local p = fake_primitives()
-    local captured
-    term_runner.spawn({
-      prompt = "x",
-      session_id = "sid",
-      snippet_name = "s",
-      on_exit = function(code, info)
-        captured = { code = code, info = info }
-      end,
-      primitives = p.fns,
-    })
     local handle_ref
-    -- Re-invoke spawn with a spy on the termopen's on_exit so we can
-    -- assert the cancelled flag is propagated.
-    p = fake_primitives()
     local captured_cancelled
     p.fns.termopen = function(_, opts)
-      -- Simulate the PTY exiting after the caller cancels.
       handle_ref = { opts = opts }
       return 7
     end
-    local h = term_runner.spawn({
+    local h = spawn_sync(p, {
       prompt = "x",
       session_id = "sid",
       snippet_name = "s",
       on_exit = function(_, info)
         captured_cancelled = info.cancelled
       end,
-      primitives = p.fns,
     })
     h:cancel()
     handle_ref.opts.on_exit(7, 15, "exit")
     assert.is_true(captured_cancelled)
-    -- first handle captured from earlier spawn is unused; silence unused-var
-    assert.is_nil(captured)
+    assert.is_true(h:is_cancelled())
+  end)
+
+  it("splits prompt + CR into two deferred chansends when prompt_delay_ms > 0", function()
+    local p = fake_primitives()
+    local sends = {}
+    p.fns.chansend = function(_job, data)
+      sends[#sends + 1] = data
+    end
+    local deferred_fns = {}
+    p.fns.defer_fn = function(fn, ms)
+      deferred_fns[#deferred_fns + 1] = { fn = fn, ms = ms }
+    end
+
+    term_runner.spawn({
+      prompt = "hello",
+      session_id = "sid",
+      snippet_name = "s",
+      prompt_delay_ms = 500,
+      on_exit = function() end,
+      primitives = p.fns,
+    })
+
+    -- Nothing sent yet; first defer queued at 500ms.
+    assert.equals(0, #sends)
+    assert.equals(1, #deferred_fns)
+    assert.equals(500, deferred_fns[1].ms)
+
+    -- Fire the outer defer: first chansend (text only), second defer queued.
+    deferred_fns[1].fn()
+    assert.equals(1, #sends)
+    assert.equals("hello", sends[1])
+    assert.equals(2, #deferred_fns)
+
+    -- Fire the inner defer: second chansend (the CR).
+    deferred_fns[2].fn()
+    assert.equals(2, #sends)
+    assert.equals("\r", sends[2])
   end)
 
   it("rejects missing required opts", function()

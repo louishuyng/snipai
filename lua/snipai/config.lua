@@ -87,6 +87,12 @@ function M.defaults(env)
       -- the full list you want claude to see.
       extra_args = { "--permission-mode", "acceptEdits", "--setting-sources", "" },
       timeout_ms = 5 * 60 * 1000,
+      -- Claude Code's Ink-based TUI needs a moment to render before it
+      -- reliably accepts input. We defer the initial chansend by this
+      -- many milliseconds so the rendered prompt + CR doesn't land
+      -- during init and get swallowed. Raise if your machine is slow.
+      -- Set to 0 to send synchronously (useful for non-TUI backends).
+      prompt_delay_ms = 500,
     },
     ui = {
       notify = "auto",

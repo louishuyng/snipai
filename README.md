@@ -1,3 +1,4 @@
+
 # snipai
 
 > AI-powered snippets for Neovim, backed by Claude Code.
@@ -6,11 +7,7 @@
 
 
 
-
-
-
-https://github.com/user-attachments/assets/3870ebd4-c056-4ab8-a38e-c8a3d1d7220c
-
+https://github.com/user-attachments/assets/98e1e08e-97b1-41fd-a0ee-a34605a334de
 
 
 

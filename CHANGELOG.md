@@ -83,7 +83,9 @@ Target: installable, documented, ready for external users.
 
 - [ ] `blink.cmp` source adapter (parallel to the existing `nvim-cmp` source, from a shared core).
 - [ ] Streaming progress in the notification (live tool-use counter as events arrive).
-- [ ] Replay from history (`<C-r>` in history picker re-runs with original parameters).
+- [ ] Live-refresh Telescope pickers (`:SnipaiRunning` / `:SnipaiHistory` subscribe to the event bus so rows transition in place as jobs complete; currently a point-in-time snapshot at open).
+- [ ] Replay from history (`<C-r>` in the Telescope history picker re-runs with original parameters).
+- [ ] Delete from history (`<C-d>` in the Telescope history picker removes the entry from the JSONL).
 - [ ] `:SnipaiCancel <id>` wired to a keymap inside the running picker.
 - [ ] Configurable concurrency limits (`max_concurrent` jobs).
 - [ ] Stress test: five concurrent runs without state corruption.

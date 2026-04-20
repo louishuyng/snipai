@@ -260,12 +260,12 @@ Invalid snippets are **skipped** (not aborted), with one notification pointing a
 
 **Inside the history picker (buffer-local):**
 
-| Key | Action |
-|---|---|
-| `<CR>` | Open detail popup |
-| `<C-q>` | Push the entry's file changes into the quickfix list and close |
-| `<C-r>` | Replay the snippet with its original parameters |
-| `<C-d>` | Delete the history entry |
+| Key | Action | Status |
+|---|---|---|
+| `<CR>` | Open detail popup | — |
+| `<C-q>` | Push the entry's file changes into the quickfix list and close | — |
+| `<C-r>` | Replay the snippet with its original parameters | **v0.2.0** — not yet wired |
+| `<C-d>` | Delete the history entry | **v0.2.0** — not yet wired |
 
 Remap any of these via `setup({ keymaps = { … } })`, or pass `keymaps = false` to disable every default and bind everything manually.
 

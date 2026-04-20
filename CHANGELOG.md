@@ -27,10 +27,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Optional `filetype` field on snippets — single string (`"lua"`) or non-empty array (`["lua","luau"]`). Missing is backward-compatible "any buffer". Enforced at the cmp source via `Snippet:matches_filetype(ft)`; non-matching snippets are silently dropped from completion.
 - Optional `insert` field on snippets — a template rendered at trigger time and placed at the cursor (replacing the cmp-typed prefix) before the Claude run, with a silent `:write` so Claude has an on-disk scaffold to enrich. Snippets without `insert` keep the "run body only" behaviour.
 - Reserved built-in placeholders available inside `insert` and `body`: `{{cursor_file}}`, `{{cursor_line}}`, `{{cursor_col}}`, `{{cwd}}`. Auto-populated at trigger time from the buffer/window state; declaring any reserved name in `parameter` is rejected at load time.
-- Buffer refresh after job completion: `snipai.setup()` subscribes to `job_done` and runs `:checktime` on every loaded buffer whose file appears in the job's `files_changed` list, so Claude's in-place edits reload without manual `:e!`.
+- Buffer refresh after job completion: `snipai.setup()` subscribes to `job_done` and runs `:checktime` on every loaded buffer whose file appears in the job's `files_changed` list, so Claude's in-place edits reload without manual `:e!`. Extracted into `lua/snipai/buffer_refresh.lua` with an `attach(events, refresh_fn?)` helper that mirrors `statusline.attach` and keeps `init.lua` free of `:checktime` plumbing.
+- History → quickfix: `history:to_quickfix(id)` and the `snipai.history.to_quickfix(id)` facade push the entry's `files_changed` into the quickfix list with one item per path (lnum=1 since Claude's Edit events don't carry line numbers) and a `snipai: <snippet>` title so multiple runs stay visually distinguishable. The `setqflist` dependency is injected so the behaviour is fully unit-testable without touching Neovim's qf state.
+- Detail popup (`lua/snipai/ui/detail.lua`): floating window over a read-only scratch buffer (markdown filetype, centered, rounded border) rendering a finalized or pending history row — status badge with duration + exit code, timestamps, parameters sorted by key, files-changed bullets, rendered prompt with preserved newlines, and a stderr section reserved for failed runs. Renderer is a pure function (`M.render(entry) -> { lines, title }`) split from the window wrapper so formatting is fully unit-tested.
+- Telescope pickers (`lua/snipai/pickers/*`):
+  - `pickers.running` — active-job picker. Row: name, status badge, elapsed duration, short id, triggering file basename. `<CR>` opens the detail popup for the job's history entry; `<C-c>` cancels. Point-in-time snapshot for v0.1.0; live refresh ships in v0.2.0.
+  - `pickers.history` — history picker with `project` (default) or `all` scope. Row: status glyph (`+` / `x` / `~` / `…`), HH:MM:SS, name, duration, file count, short id. Sorted newest-first. `<CR>` opens detail; `<C-q>` pushes the entry's `files_changed` into the quickfix list and reports the count. Replay (`<C-r>`) and delete (`<C-d>`) are scoped to v0.2.0.
+  - Both pickers soft-fail (notify + return) when Telescope isn't installed or the input list is empty; `opts.telescope = false` sentinel forces the "absent" path for tests.
+- Full `:Snipai*` user command set in `plugin/snipai.lua`: `:SnipaiRunning`, `:SnipaiHistory [project|all]`, `:SnipaiDetail <id>`, `:SnipaiToQuickfix <id>`, `:SnipaiCancel <id>`, `:SnipaiReload` join the existing `:SnipaiTrigger <name>`. Each dispatches through a shared `get_state()` guard that warns cleanly when `setup()` hasn't run. Id-based commands autocomplete against `history:list{scope="all"}` or `jobs:list()`; scope completion for `:SnipaiHistory` returns `{"project", "all"}`.
+- Default global keymaps (`lua/snipai/keymaps.lua`): `<leader>sr` / `<leader>sh` / `<leader>sH` installed from `setup()` via `keymaps.apply(spec, opts)`. `setup({ keymaps = false })` skips everything, `setup({ keymaps = { running = false } })` disables a single entry, `spec[key] = "<C-s>"` overrides the lhs. `opts.keymap_set` is the test seam.
 - Full project documentation: `README.md`, `doc/snipai.txt` (vimdoc), `ARCHITECTURE.md`, `CONTRIBUTING.md`, this changelog.
 
 ### Changed
+- `init.lua` is now strictly compositional: the Neovim-side trigger defaults (`default_gather_builtins`, `default_place_insert`, `default_save_buffer`) moved into `lua/snipai/trigger.lua` where they are actually used, and the `job_done → :checktime` subscription moved into `lua/snipai/buffer_refresh.lua` behind `attach(events, refresh_fn?)`. Shrinks `init.lua` from ~294 lines back to ~228 and removes every direct `vim.api.*` call from the top-level module. No public API change.
 - Dropped the hard dependency on `nvchad/volt` in favour of `vim.ui.input` / `vim.ui.select`; users get popup-style prompts automatically when any `dressing.nvim` / `snacks.nvim` / `telescope-ui-select.nvim` override is installed.
 - **BREAKING** (pre-1.0): default snippet location moved from `~/.config/nvim/snipai/snippets.json` to `~/.config/snipai/snippets.json`; default history location moved from `~/.local/share/nvim/snipai/history.jsonl` to `~/.local/share/snipai/history.jsonl`. Snipai now owns its own XDG directories instead of nesting under the Neovim config/data trees. `config.lua` no longer probes `vim.fn.stdpath()` — path resolution is pure XDG (env overrides → `$XDG_{CONFIG,DATA}_HOME` → `$HOME/.config` / `$HOME/.local/share`). Users who relied on the old paths can either `mv` their files or set `config_paths` / `history.path` explicitly in `setup({...})`.
 - Default `claude.extra_args` is now `{ "--permission-mode", "acceptEdits", "--setting-sources", "" }` (previously empty). `--permission-mode acceptEdits` prevents non-interactive `claude -p` from silently skipping Edit / Write / MultiEdit tools (there is nobody to approve them otherwise). `--setting-sources ""` loads no settings sources for the invocation, suppressing user-installed Claude Code plugins (superpowers, etc.) and their SessionStart hooks for the run — measurably ~2–3× faster on typical snippet workloads because the plugin bootstrap injects 12k+ tokens of context into every non-interactive session. Interactive `claude` sessions are unaffected. Keychain auth, memory, CLAUDE.md discovery, and MCP servers continue to work. Override via `setup({ claude = { extra_args = {...} } })` — the field is a nested array so user values REPLACE the default outright.
@@ -68,14 +77,14 @@ Target: MVP that a real user can drive end-to-end for the first time. All items 
 
 Target: installable, documented, ready for external users.
 
-- [ ] Telescope picker of active jobs (`:SnipaiRunning`).
-- [ ] Telescope picker of history with `project` / `all` scopes (`:SnipaiHistory`).
-- [ ] History entry detail popup (`:SnipaiDetail`).
-- [ ] `files_changed → quickfix` action (`:SnipaiToQuickfix`, `<C-q>` in picker).
-- [ ] All default user commands: `:SnipaiRunning`, `:SnipaiHistory`, `:SnipaiDetail`, `:SnipaiToQuickfix`, `:SnipaiCancel`, `:SnipaiReload`, `:SnipaiTrigger`.
-- [ ] Default keymaps (`<leader>sr`, `<leader>sh`, `<leader>sH`, picker-local actions).
+- [x] Telescope picker of active jobs (`:SnipaiRunning`).
+- [x] Telescope picker of history with `project` / `all` scopes (`:SnipaiHistory`).
+- [x] History entry detail popup (`:SnipaiDetail`).
+- [x] `files_changed → quickfix` action (`:SnipaiToQuickfix`, `<C-q>` in picker).
+- [x] All default user commands: `:SnipaiRunning`, `:SnipaiHistory`, `:SnipaiDetail`, `:SnipaiToQuickfix`, `:SnipaiCancel`, `:SnipaiReload`, `:SnipaiTrigger`.
+- [x] Default keymaps (`<leader>sr`, `<leader>sh`, `<leader>sH`, picker-local actions).
 - [ ] `:checkhealth snipai` reporting dependency status.
-- [ ] `:help snipai` with full vimdoc tags.
+- [x] `:help snipai` with full vimdoc tags.
 - [ ] README polished with screenshots / GIFs.
 - [ ] CI matrix: nvim 0.10 stable + nightly on Ubuntu and macOS.
 

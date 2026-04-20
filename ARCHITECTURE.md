@@ -59,9 +59,11 @@ This document is the map of the codebase. It covers the folder layout, what each
 snipai/
 ├── lua/
 │   └── snipai/
-│       ├── init.lua                 -- setup(opts), reload, facades, subscribes job_done
-│       ├── trigger.lua              -- state-pure run(state, name, ctx) dispatcher
+│       ├── init.lua                 -- setup(opts), reload, facades — pure composition
+│       ├── trigger.lua              -- state-pure run(state, name, ctx) + neovim-side defaults
 │       ├── statusline.lua           -- animated spinner indicator for statuslines
+│       ├── buffer_refresh.lua       -- job_done → :checktime loop (attach helper)
+│       ├── keymaps.lua              -- global <leader>sr/sh/sH installer
 │       ├── config.lua               -- defaults + user-opts deep merge, XDG paths
 │       ├── registry.lua             -- load JSON configs, merge, lookup by prefix
 │       ├── snippet.lua              -- Snippet: validate, render body + insert w/ builtins
@@ -72,19 +74,23 @@ snipai/
 │       │   ├── init.lua             -- manager: spawn, list, get, cancel
 │       │   └── job.lua              -- Job state machine + progress accumulator
 │       ├── history/
-│       │   ├── init.lua             -- public API: add_pending, finalize, list, get, clear
+│       │   ├── init.lua             -- public API: add_pending, finalize, list, get, clear, to_quickfix
 │       │   └── store.lua            -- JSONL read/append/prune on disk
 │       ├── claude/
 │       │   ├── runner.lua           -- spawn claude CLI via vim.system (DI seam)
 │       │   └── parser.lua           -- stream-json NDJSON parser (pure function)
 │       ├── ui/
 │       │   ├── popup.lua            -- vim.ui.* facade for typed-field collection
-│       │   └── param_form.lua       -- snippet-aware form driven by ui.popup
+│       │   ├── param_form.lua       -- snippet-aware form driven by ui.popup
+│       │   └── detail.lua           -- history-entry floating popup (pure renderer + window)
+│       ├── pickers/
+│       │   ├── running.lua          -- Telescope picker of active jobs
+│       │   └── history.lua          -- Telescope picker of history (project|all)
 │       └── sources/
 │           └── cmp.lua              -- nvim-cmp source
 │
 ├── plugin/
-│   └── snipai.lua                   -- :Snipai* user commands, default mappings
+│   └── snipai.lua                   -- :Snipai* user commands (all 7); dispatches to state
 ├── doc/
 │   └── snipai.txt                   -- `:help snipai` (doc/tags is generated + gitignored)
 │
@@ -112,7 +118,7 @@ snipai/
 └── LICENSE
 ```
 
-**Planned but not yet built:** `ui/detail.lua` (history-entry popup), `pickers/running.lua` + `pickers/history.lua` (Telescope pickers), `sources/blink.lua` (blink.cmp adapter). These land in a later release; the file tree above reflects what exists on `main` today.
+**Planned but not yet built:** `sources/blink.lua` (blink.cmp adapter, Phase 5). The file tree above reflects what exists on `main` today.
 
 ---
 
@@ -141,7 +147,7 @@ Each file has **one** purpose. If you find yourself reaching for a second one, i
 | `jobs.job` | `Job:new()`, state machine, accumulators | one snippet run: state transitions (`pending` → `running` → `success`/`failure`/`cancelled`), progress accumulation, file-path collection. |
 | `jobs` | `spawn(snippet, params, prompt)`, `list()`, `get(id)`, `cancel(id)` | the Jobs manager. Owns the lifecycle and emits `job_*` events. |
 | `history.store` | `append(entry)`, `read_all()`, `prune(max)` | JSONL on-disk storage. Pure-ish: takes a path, returns entries. Atomic append via O_APPEND. |
-| `history` | `add_pending`, `finalize`, `list`, `get`, `clear`, `to_quickfix` | public history API. Uses `store` for persistence, subscribes to `job_*` events to record lifecycle. |
+| `history` | `add_pending`, `finalize`, `list`, `get`, `clear`, `to_quickfix` | public history API. Uses `store` for persistence; `to_quickfix(id)` builds one qf item per touched file (lnum=1 since Edit events carry no line numbers) and sets a `snipai: <snippet>` title. `setqflist` is injected for tests. |
 
 ### UI (wraps `vim.ui.*`; only touched when a user acts)
 
@@ -149,6 +155,16 @@ Each file has **one** purpose. If you find yourself reaching for a second one, i
 |---|---|---|
 | `ui.popup` | `collect(fields, opts)` | sequential `vim.ui.input` / `vim.ui.select` chain for a list of typed fields; boolean is a two-option select mapped back to Lua booleans; both `vim.ui.*` fns are injectable for tests and alternate backends. |
 | `ui.param_form` | `open(snippet, opts)` | snippet-aware layer: builds an ordered field list from `snippet.parameter`, delegates to `ui.popup`, resolves defaults and validates via `params.validate_all`, surfaces errors through the notifier, guarantees `on_submit` fires only with valid values. |
+| `ui.detail` | `render(entry) -> { lines, title }`, `open(entry, opts?)` | history-entry detail popup. `render` is a pure function returning section-assembled lines (status, meta, params, files, prompt, stderr); missing optional fields drop their rows, `Started` / `Finished` always render and degrade to `-`. `open` wraps the output in a centered readonly scratch buffer with `q` / `<Esc>` to close. |
+
+### Pickers (Telescope-backed; soft-fail without it)
+
+| Module | Exports | Role |
+|---|---|---|
+| `pickers.running` | `format_row(job, now_ms)` (pure), `open(opts)` | active-job picker — name, status badge, elapsed duration, short id, file basename. `<CR>` → `ui.detail.open` for the job's history row; `<C-c>` cancels. Point-in-time snapshot; live refresh scheduled for v0.2.0. |
+| `pickers.history` | `format_row(entry)` (pure), `open(opts)` | history picker scoped by `opts.scope` (`project` default, `all`). Rows sorted newest-first with status glyphs (`+` / `x` / `~` / `…`). `<CR>` opens detail; `<C-q>` calls `history:to_quickfix(id)` then notifies the file count. `<C-r>` replay and `<C-d>` delete scoped to v0.2.0. |
+
+Both picker modules accept `opts.telescope` with three modes: `nil` auto-resolves via `pcall`, `false` forces "absent" (test seam), a table is used as a pre-built bundle. `format_row` is unit-tested; the Telescope wrapper is smoke-only per the design spec.
 
 ### Adapters (thin, engine-specific)
 
@@ -160,10 +176,12 @@ Each file has **one** purpose. If you find yourself reaching for a second one, i
 
 | File | Role |
 |---|---|
-| `init.lua` | `snipai.setup(opts)` composes config → registry → jobs → history → notify → event wiring + subscribes `job_done` for the buffer-refresh step. Re-exports public API (`trigger`, `jobs`, `history`, `reload`); `trigger` is a thin wrapper over `snipai.trigger.run(state, ...)`. |
-| `trigger.lua` | State-pure `run(state, name_or_snippet, ctx)` implementing the dispatch (form vs programmatic, insert placement + auto-save, refuse-on-unnamed-scratch). Extracted so `init.lua` stays focused on wiring. |
-| `statusline.lua` | `status(bufnr?)` returning `"⟳ snipai"` when an active job has touched this buffer's file, empty otherwise. Reads state via the public `snipai.jobs.list()` / `Job:files_changed()` API so it stays decoupled from internals. |
-| `plugin/snipai.lua` | Declares `:Snipai*` commands and sets up default keymaps (unless `keymaps = false`). Runs once per Neovim startup. |
+| `init.lua` | `snipai.setup(opts)` composes config → registry → jobs → history → notify → event wiring. Delegates the `job_done` subscription to `buffer_refresh.attach`, spinner wiring to `statusline.attach`, and default-keymap installation to `keymaps.apply`. Re-exports public API (`trigger`, `jobs`, `history`, `reload`); `trigger` is a thin wrapper over `snipai.trigger.run(state, ...)`. Contains no direct `vim.api.*` calls. |
+| `trigger.lua` | State-pure `run(state, name_or_snippet, ctx)` implementing the dispatch (form vs programmatic, insert placement + auto-save, refuse-on-unnamed-scratch). Owns the Neovim-side defaults for `gather_builtins` / `place_insert` / `save_buffer` — `state.<name>` overrides for tests, otherwise the locally-defined defaults run. |
+| `statusline.lua` | `attach(events)`, `status(bufnr?)` returning `"⟳ snipai"` when an active job has touched this buffer's file, empty otherwise. Reads state via the public `snipai.jobs.list()` / `Job:files_changed()` API so it stays decoupled from internals. |
+| `buffer_refresh.lua` | `attach(events, refresh_fn?)`. Subscribes the given bus's `job_done` and runs `:checktime` on every loaded buffer whose file appears in the job's `files_changed` list. Default refresh is pluggable for tests (no-op in the init_spec helper). |
+| `keymaps.lua` | `apply(spec, opts)`. Installs `<leader>sr` / `<leader>sh` / `<leader>sH` → `:SnipaiRunning` / `:SnipaiHistory project` / `:SnipaiHistory all`. `spec = false` skips everything, per-key `false` / `""` disables a slot, string values override the lhs. `opts.keymap_set` is the test seam. |
+| `plugin/snipai.lua` | Declares the full `:Snipai*` command set (Trigger, Running, History, Detail, ToQuickfix, Cancel, Reload). Each command pulls state from `require("snipai")._state` through a shared `get_state()` guard that warns cleanly when `setup()` hasn't run. Id-based commands autocomplete against `history:list{scope="all"}` or `jobs:list()`. Default keymaps are installed from `setup()` via `snipai.keymaps`, not here. |
 
 ---
 
@@ -178,7 +196,9 @@ The rule is simple: **arrows point downward in the Layers diagram; never upward.
 | `claude/runner` | `vim.system` (or plenary.job fallback), `claude/parser` | jobs, history, UI |
 | `jobs/*` | `claude/*`, `events`, `snippet`, `notify` | UI, pickers, adapters |
 | `history/*` | filesystem (`vim.uv`, injectable fs), `events` | UI, pickers, adapters, jobs |
-| `ui/*`, `pickers/*`, `sources/*` | core modules + their own runtime dep (`vim.ui` / Telescope / cmp) | each other (UI should not require pickers; sources should not require UI) |
+| `ui/*`, `sources/*` | core modules + their own runtime dep (`vim.ui` / cmp) | each other, pickers (UI should not require pickers; sources should not require UI) |
+| `pickers/*` | core modules + `ui.detail` (for `<CR>` action) + Telescope | jobs internals, sources, history store internals |
+| `buffer_refresh`, `statusline`, `keymaps` | `events` + `vim.*` | everything else in the plugin (they are leaf attach-helpers) |
 | `init.lua`, `plugin/snipai.lua` | anything | — |
 
 **Why this matters:** these rules are what make `tests/unit/` dependency-free. A new contributor can run the unit suite on pure-Lua modules (events, params, snippet, parser) in ~5ms with standalone `busted` — no Neovim process to boot.

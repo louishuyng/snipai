@@ -100,32 +100,47 @@ function M.spawn(opts)
   end)
   handle._job_id = job_id
 
-  -- Real `claude` boots an Ink-based TUI that needs ~hundreds of ms to
-  -- render before it reliably accepts input. If we chansend the prompt
-  -- + CR synchronously here, the trailing CR lands during init and gets
-  -- swallowed — the prompt sits in the input box until the user presses
-  -- Enter manually. Split into two deferred sends so the text settles,
-  -- then the submit goes in cleanly. Tests pass 0 to keep the flow
-  -- synchronous.
+  -- Two TUI quirks we have to work around:
+  --
+  -- 1. Claude's Ink-based TUI needs ~hundreds of ms to render before
+  --    it accepts input reliably. Fire the first chansend from a
+  --    defer_fn so the initial bytes don't land during init.
+  --
+  -- 2. Any embedded newline in the prompt flips the TUI's input into
+  --    multi-line mode. In that mode, a plain Enter adds another
+  --    newline instead of submitting — the prompt sits in the input
+  --    box forever. Bracketed-paste markers (CSI 200 ~ / CSI 201 ~)
+  --    tell the TUI "this is pasted content, treat the newlines as
+  --    literal input," so the trailing Enter we send a moment later
+  --    submits the whole thing at once.
+  --
+  -- Tests pass prompt_delay_ms = 0 to keep the flow synchronous.
+  local BRACKETED_PASTE_START = "\27[200~"
+  local BRACKETED_PASTE_END = "\27[201~"
+
   local delay_ms = opts.prompt_delay_ms
   if delay_ms == nil then
     delay_ms = DEFAULT_PROMPT_DELAY_MS
   end
-  if delay_ms <= 0 then
-    p.chansend(job_id, opts.prompt .. "\r")
-  else
+
+  local function send_paste_and_submit()
+    if handle._done or handle._cancelled then
+      return
+    end
+    p.chansend(job_id, BRACKETED_PASTE_START .. opts.prompt .. BRACKETED_PASTE_END)
+    local submit_delay = math.max(50, math.floor(delay_ms > 0 and delay_ms / 2 or 100))
     p.defer_fn(function()
       if handle._done or handle._cancelled then
         return
       end
-      p.chansend(job_id, opts.prompt)
-      p.defer_fn(function()
-        if handle._done or handle._cancelled then
-          return
-        end
-        p.chansend(job_id, "\r")
-      end, math.max(50, math.floor(delay_ms / 2)))
-    end, delay_ms)
+      p.chansend(job_id, "\r")
+    end, submit_delay)
+  end
+
+  if delay_ms <= 0 then
+    send_paste_and_submit()
+  else
+    p.defer_fn(send_paste_and_submit, delay_ms)
   end
   return handle
 end

@@ -9,6 +9,7 @@ local function fake_primitives()
     jobstop_calls = 0,
     jobstop_arg = nil,
   }
+  rec.chansend_calls = {}
   rec.fns = {
     create_buf = function()
       rec.create_buf_calls = rec.create_buf_calls + 1
@@ -23,7 +24,8 @@ local function fake_primitives()
       return 7
     end,
     chansend = function(job, data)
-      rec.chansend_args = { job = job, data = data }
+      rec.chansend_args = { job = job, data = data } -- most-recent wins (back-compat)
+      rec.chansend_calls[#rec.chansend_calls + 1] = { job = job, data = data }
     end,
     jobstop = function(job)
       rec.jobstop_calls = rec.jobstop_calls + 1
@@ -55,7 +57,7 @@ local function spawn_sync(p, overrides)
 end
 
 describe("snipai.claude.term_runner", function()
-  it("creates a scratch buffer, termopens claude, and sends the prompt", function()
+  it("creates a scratch buffer, termopens claude, and sends a bracketed-paste prompt + CR", function()
     local p = fake_primitives()
     local handle = spawn_sync(p, { extra_args = { "--permission-mode", "acceptEdits" } })
     assert.equals(1, p.create_buf_calls)
@@ -68,11 +70,21 @@ describe("snipai.claude.term_runner", function()
       "--permission-mode",
       "acceptEdits",
     }, p.termopen_args)
-    assert.equals(7, p.chansend_args.job)
-    assert.equals("hello\r", p.chansend_args.data)
+    assert.equals(2, #p.chansend_calls, "expected one paste chansend + one CR chansend")
+    assert.equals("\27[200~hello\27[201~", p.chansend_calls[1].data)
+    assert.equals(7, p.chansend_calls[1].job)
+    assert.equals("\r", p.chansend_calls[2].data)
     assert.equals(42, handle:bufnr())
     assert.equals(7, handle:job_id())
     assert.equals("11111111-1111-1111-1111-111111111111", handle:session_id())
+  end)
+
+  it("wraps multi-line prompts in bracketed-paste markers so embedded newlines do not split the submit", function()
+    local p = fake_primitives()
+    local prompt = "line one\nline two\n\nafter blank"
+    spawn_sync(p, { prompt = prompt })
+    assert.equals("\27[200~" .. prompt .. "\27[201~", p.chansend_calls[1].data)
+    assert.equals("\r", p.chansend_calls[2].data)
   end)
 
   it("honors opts.claude_cmd", function()
@@ -116,7 +128,7 @@ describe("snipai.claude.term_runner", function()
     assert.is_true(h:is_cancelled())
   end)
 
-  it("splits prompt + CR into two deferred chansends when prompt_delay_ms > 0", function()
+  it("defers the paste + CR when prompt_delay_ms > 0", function()
     local p = fake_primitives()
     local sends = {}
     p.fns.chansend = function(_job, data)
@@ -141,13 +153,13 @@ describe("snipai.claude.term_runner", function()
     assert.equals(1, #deferred_fns)
     assert.equals(500, deferred_fns[1].ms)
 
-    -- Fire the outer defer: first chansend (text only), second defer queued.
+    -- Fire the outer defer: paste chansend fires, CR defer queued.
     deferred_fns[1].fn()
     assert.equals(1, #sends)
-    assert.equals("hello", sends[1])
+    assert.equals("\27[200~hello\27[201~", sends[1])
     assert.equals(2, #deferred_fns)
 
-    -- Fire the inner defer: second chansend (the CR).
+    -- Fire the CR defer: the submit lands separately.
     deferred_fns[2].fn()
     assert.equals(2, #sends)
     assert.equals("\r", sends[2])

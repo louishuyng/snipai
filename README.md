@@ -4,6 +4,12 @@
 
 `snipai` turns your snippet library into an AI agent. Type a prefix, pick from `nvim-cmp`, fill the parameters, and Claude Code does the rest — edit files, run tests, anything the CLI can do — while you keep editing. Every run is logged per-project; any past run's file changes drop into the quickfix list with one keystroke.
 
+
+
+https://github.com/user-attachments/assets/954707ca-6d79-4727-b02b-688b1c237a4a
+
+
+
 ![status](https://img.shields.io/badge/status-alpha-orange) ![neovim](https://img.shields.io/badge/Neovim-0.10%2B-57A143?logo=neovim) ![license](https://img.shields.io/badge/license-MIT-blue)
 
 ---

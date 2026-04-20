@@ -8,6 +8,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added — session-terminal backend (v0.2.0 in-flight)
+- PTY-hosted interactive `claude` sessions via `vim.fn.termopen`. Every snippet now spawns a persistent session addressable by `--session-id <uuid>`; follow-up turns are a single `chansend` away.
+- `lua/snipai/claude/session_paths.lua` — pure cwd → `~/.claude/projects/<cwd-slug>/<sid>.jsonl` mapping.
+- `lua/snipai/claude/session_tailer.lua` — `vim.uv.fs_poll` tailer that forwards new transcript bytes into the existing `claude.parser`, so `files_changed` and quickfix integration survive the backend swap unchanged.
+- `lua/snipai/claude/term_runner.lua` — hidden scratch buffer + `termopen` + `chansend` host, with every Neovim primitive injectable through `opts.primitives` for unit tests.
+- `lua/snipai/ui/detail_tabs.lua` — tabbed detail float (Summary + Terminal). `<Tab>` / `<S-Tab>` swap the float's buffer via `nvim_win_set_buf`; historical rows without a live PTY fall back to a read-only placeholder.
+- Five-state job lifecycle: `pending / running / idle / complete / cancelled / error`. `running ⇄ idle` transitions fire on parser `result` events so the UI can distinguish "Claude is producing output" from "Claude is waiting for your next message" across a multi-turn session.
+- `session_id` field on history entries, carried through `history.store` additively. Legacy rows written with `status = "success"` keep parsing; UI layers display them as `complete`.
+- Running and history pickers ship 5-state glyphs: `… running / ◦ idle / ✓ complete / ✗ cancelled / ! error`. Selecting a row lands in the tabbed detail popup; running rows attach to the live PTY buffer.
+- `snipai.jobs.get_terminal_buf(id)` exposed so pickers and the detail popup can jump into the active PTY without reaching into private Job state.
+- `VimLeavePre` autocmd soft-stops every active session on Neovim exit so no orphan `claude` processes survive the editor.
+- Mid-session buffer refresh: `buffer_refresh.attach` now subscribes to `job_progress` (not only `job_done`), so each new file a long session touches reloads in open buffers the moment it first appears. Per-job dedup stops the same path from being refreshed twice.
+- Parser accepts session-JSONL shape additively — top-level `tool_use` / `tool_result` records and `assistant.content` (in addition to `assistant.message.content`) now produce the same normalized event stream as stream-json. Existing stream-json fixtures unaffected.
+
+### Changed — session-terminal backend
+- `claude/runner.lua` rewritten as a thin coordinator: generates a session-id, resolves the transcript path via `session_paths`, starts a `session_tailer`, and delegates the PTY to `term_runner`. Public `spawn(prompt, opts, on_event, on_exit) -> handle` contract unchanged; the old `vim.system` + `--output-format stream-json` code path is gone.
+- Job terminal successful state renamed `success` → `complete` in `jobs/job.lua`. `history.store` and UI layers accept the legacy `success` token as a transparent alias for readback.
+
 ### Added
 - Initial project scaffolding: `Makefile`, `stylua.toml`, `.luarc.json`, `.editorconfig`, `.gitignore`, `.busted`, `tests/minimal_init.lua`.
 - Pub/sub event bus (`lua/snipai/events.lua`) with factory-based buses so each job can own its own bus without shared global state.
@@ -88,16 +106,28 @@ Target: installable, documented, ready for external users.
 - [ ] README polished with screenshots / GIFs.
 - [ ] CI matrix: nvim 0.10 stable + nightly on Ubuntu and macOS.
 
-### v0.2.0 — second adapter and polish (Phase 5 exit)
+### v0.2.0 — session-terminal backend
+
+- [x] PTY-hosted `claude` session per snippet; `--session-id <uuid>` + `--name <snippet>`.
+- [x] JSONL-tailer-fed event model; `files_changed` / quickfix preserved across the backend swap.
+- [x] 5-state job lifecycle (`running / idle / complete / cancelled / error`).
+- [x] Tabbed detail popup (`<Tab>` / `<S-Tab>` swaps Summary ↔ Terminal).
+- [x] 5-state glyphs in the running and history pickers.
+- [x] `:SnipaiCancel <id>` via `vim.fn.jobstop` (SIGTERM → SIGKILL).
+- [x] `VimLeavePre` soft-stop for active sessions.
+- [x] Mid-session `:checktime` — each new file a long session touches refreshes in open buffers the moment it first appears.
+- [ ] Manual smoke pass on macOS and Ubuntu against a real `claude` CLI.
+
+### v0.3.0 — second adapter and polish
 
 - [ ] `blink.cmp` source adapter (parallel to the existing `nvim-cmp` source, from a shared core).
-- [ ] Streaming progress in the notification (live tool-use counter as events arrive).
 - [ ] Live-refresh Telescope pickers (`:SnipaiRunning` / `:SnipaiHistory` subscribe to the event bus so rows transition in place as jobs complete; currently a point-in-time snapshot at open).
-- [ ] Replay from history (`<C-r>` in the Telescope history picker re-runs with original parameters).
+- [ ] Replay from history (`<C-r>` in the Telescope history picker re-runs with original parameters; `claude --resume <uuid>` when the session-id is known).
 - [ ] Delete from history (`<C-d>` in the Telescope history picker removes the entry from the JSONL).
+- [ ] Notification heartbeat for hidden sessions (running-count summary so users who never open the terminal still see liveness).
 - [ ] `:SnipaiCancel <id>` wired to a keymap inside the running picker.
-- [ ] Configurable concurrency limits (`max_concurrent` jobs).
-- [ ] Stress test: five concurrent runs without state corruption.
+- [ ] Configurable concurrency limits (`max_concurrent` sessions).
+- [ ] Stress test: five concurrent sessions without state corruption.
 
 ---
 

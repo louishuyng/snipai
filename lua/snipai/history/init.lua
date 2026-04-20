@@ -11,8 +11,10 @@
 --   id           string   assigned here (see opts.id injection below)
 --   cwd          string   captured here from opts.cwd
 --   started_at   number   ms since epoch, stamped here
---   status       string   "running" on add_pending, "success"|"error"
---                         |"cancelled" on finalize
+--   status       string   "running" on add_pending,
+--                         "complete"|"cancelled"|"error" on finalize
+--   session_id   string?  claude --session-id <uuid>, set by the caller
+--                         when a PTY-hosted session was spawned
 --   -- provided by the caller on add_pending:
 --   snippet      string   snippet name
 --   prefix       string   the prefix that triggered it (if any)
@@ -67,7 +69,7 @@ local function default_setqflist(items, action, what)
   return vim.fn.setqflist(items, action, what)
 end
 
-local TERMINAL_STATUSES = { success = true, error = true, cancelled = true }
+local TERMINAL_STATUSES = { complete = true, success = true, error = true, cancelled = true }
 
 -- ---------------------------------------------------------------------------
 -- History class
@@ -178,7 +180,7 @@ function History:finalize(id, patch)
 
   if not TERMINAL_STATUSES[target.status] then
     return nil,
-      ("finalize patch must set status to one of success|error|cancelled (got %s)"):format(
+      ("finalize patch must set status to one of complete|cancelled|error (got %s)"):format(
         tostring(target.status)
       )
   end

@@ -1,323 +1,172 @@
+-- Exercises the session-terminal coordinator in claude/runner.lua.
+-- The term_runner + tailer primitives are injected; no real PTY or
+-- filesystem is touched.
+
 local runner = require("snipai.claude.runner")
 
--- ---------------------------------------------------------------------------
--- Fake vim.system: records argv, exposes a driver that pumps stdout/stderr
--- chunks and fires the exit callback. Pass-through scheduler keeps the
--- spec synchronous.
--- ---------------------------------------------------------------------------
-
-local function fake_system()
-  local rec = {
-    argv = nil,
-    sys_opts = nil,
-    stdout_cb = nil,
-    stderr_cb = nil,
-    on_exit = nil,
-    killed = nil,
-    kill_calls = 0,
-  }
-  local sysobj = {
-    kill = function(self, sig)
-      rec.kill_calls = rec.kill_calls + 1
-      rec.killed = sig
+local function fake_term_runner()
+  local rec = { spawns = {} }
+  rec.spawn = function(opts)
+    local slot = { opts = opts, cancelled = false }
+    slot.handle = {}
+    function slot.handle:cancel()
+      slot.cancelled = true
       return true
-    end,
-    pid = 4242,
-  }
-  rec.sysobj = sysobj
-  rec.fn = function(argv, sys_opts, on_exit)
-    rec.argv = argv
-    rec.sys_opts = sys_opts
-    rec.stdout_cb = sys_opts.stdout
-    rec.stderr_cb = sys_opts.stderr
-    rec.on_exit = on_exit
-    return sysobj
+    end
+    function slot.handle:bufnr()
+      return 101
+    end
+    function slot.handle:job_id()
+      return 202
+    end
+    function slot.handle:is_cancelled()
+      return slot.cancelled
+    end
+    function slot.handle:is_done()
+      return slot.done == true
+    end
+    function slot.fire_exit(code, info)
+      slot.done = true
+      slot.opts.on_exit(code, info or {})
+    end
+    rec.spawns[#rec.spawns + 1] = slot
+    return slot.handle
   end
-  rec.driver = {
-    stdout = function(data)
-      rec.stdout_cb(nil, data)
-    end,
-    stderr = function(data)
-      rec.stderr_cb(nil, data)
-    end,
-    stdout_err = function(err)
-      rec.stdout_cb(err, nil)
-    end,
-    finish = function(code, signal)
-      rec.on_exit({ code = code, signal = signal, stdout = "", stderr = "" })
-    end,
-  }
+  rec.last = function()
+    return rec.spawns[#rec.spawns]
+  end
   return rec
 end
 
-local function sync(fn)
-  fn()
+local function fake_tailer()
+  local rec = { tailers = {} }
+  rec.new = function(opts)
+    local t = { opts = opts, started = nil, stopped = false, ticks = 0 }
+    function t:start(path)
+      self.started = path
+    end
+    function t:tick()
+      self.ticks = self.ticks + 1
+    end
+    function t:stop()
+      self.stopped = true
+    end
+    function t:emit(evt)
+      opts.on_event(evt)
+    end
+    rec.tailers[#rec.tailers + 1] = t
+    return t
+  end
+  rec.last = function()
+    return rec.tailers[#rec.tailers]
+  end
+  return rec
 end
 
--- Read fixture once so later tests can share.
-local function read_fixture(relpath)
-  local root = debug.getinfo(1, "S").source:sub(2):match("(.*)tests/unit/claude/")
-  local f = assert(io.open(root .. relpath, "r"))
-  local content = f:read("*a")
-  f:close()
-  return content
-end
-
-describe("snipai.claude.runner", function()
-  describe("argv construction", function()
-    it("uses 'claude' as the default cmd and threads stream-json args", function()
-      local f = fake_system()
-      runner.spawn("do the thing", {
-        system = f.fn,
-        scheduler = sync,
-      }, function() end, function() end)
-      assert.are.same({
-        "claude",
-        "-p",
-        "do the thing",
-        "--output-format",
-        "stream-json",
-        "--verbose",
-      }, f.argv)
-    end)
-
-    it("honors opts.cmd", function()
-      local f = fake_system()
-      runner.spawn("p", {
-        cmd = "/usr/local/bin/claude",
-        system = f.fn,
-        scheduler = sync,
-      }, function() end, function() end)
-      assert.equals("/usr/local/bin/claude", f.argv[1])
-    end)
-
-    it("appends extra_args after the stream-json flags", function()
-      local f = fake_system()
-      runner.spawn("p", {
-        system = f.fn,
-        scheduler = sync,
-        extra_args = { "--model", "sonnet", "--max-tokens", "1000" },
-      }, function() end, function() end)
-      assert.are.same({
-        "claude",
-        "-p",
-        "p",
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        "--model",
-        "sonnet",
-        "--max-tokens",
-        "1000",
-      }, f.argv)
-    end)
-
-    it("passes timeout_ms through to vim.system opts", function()
-      local f = fake_system()
-      runner.spawn("p", {
-        system = f.fn,
-        scheduler = sync,
-        timeout_ms = 120000,
-      }, function() end, function() end)
-      assert.equals(120000, f.sys_opts.timeout)
-      assert.is_true(f.sys_opts.text)
-    end)
-  end)
-
-  describe("input validation", function()
-    it("rejects a non-string / empty prompt", function()
-      assert.has_error(function()
-        runner.spawn(nil, { system = fake_system().fn }, function() end, function() end)
-      end)
-      assert.has_error(function()
-        runner.spawn("", { system = fake_system().fn }, function() end, function() end)
-      end)
-    end)
-
-    it("requires on_event and on_exit to be functions", function()
-      local f = fake_system()
-      assert.has_error(function()
-        runner.spawn("p", { system = f.fn }, nil, function() end)
-      end)
-      assert.has_error(function()
-        runner.spawn("p", { system = f.fn }, function() end, nil)
-      end)
-    end)
-
-    it("requires vim.system or opts.system", function()
-      assert.has_error(function()
-        runner.spawn("p", { system = "not a fn" }, function() end, function() end)
-      end)
-    end)
-  end)
-
-  describe("streaming events", function()
-    it("parses complete NDJSON lines from stdout chunks", function()
-      local f = fake_system()
-      local events = {}
-      runner.spawn("p", { system = f.fn, scheduler = sync }, function(evt)
+describe("snipai.claude.runner (session-terminal coordinator)", function()
+  local function spawn(overrides)
+    overrides = overrides or {}
+    local tr = overrides.term_runner or fake_term_runner()
+    local ta = overrides.tailer or fake_tailer()
+    local events = {}
+    local exit_seen
+    local handle = runner.spawn(
+      overrides.prompt or "hello",
+      {
+        term_runner = tr,
+        tailer = ta,
+        session_paths = overrides.session_paths or {
+          session_file = function(o)
+            return "/fake/projects/" .. o.session_id .. ".jsonl"
+          end,
+        },
+        session_id_gen = overrides.session_id_gen or function()
+          return "11111111-1111-1111-1111-111111111111"
+        end,
+        cwd = "/proj",
+        snippet_name = overrides.snippet_name or "greet",
+        extra_args = overrides.extra_args or { "--permission-mode", "acceptEdits" },
+      },
+      function(evt)
         events[#events + 1] = evt
-      end, function() end)
-
-      f.driver.stdout('{"type":"system","subtype":"init","session_id":"s","model":"m","tools":[]}\n')
-      f.driver.stdout('{"type":"result","subtype":"success","duration_ms":10}\n')
-
-      assert.equals(2, #events)
-      assert.equals("system", events[1].kind)
-      assert.equals("init", events[1].subtype)
-      assert.equals("result", events[2].kind)
-      assert.equals("success", events[2].status)
-    end)
-
-    it("buffers partial lines across chunks", function()
-      local f = fake_system()
-      local events = {}
-      runner.spawn("p", { system = f.fn, scheduler = sync }, function(evt)
-        events[#events + 1] = evt
-      end, function() end)
-
-      f.driver.stdout('{"type":"result","subty')
-      assert.equals(0, #events)
-      f.driver.stdout('pe":"success","duration_ms":5}\n')
-      assert.equals(1, #events)
-      assert.equals("result", events[1].kind)
-    end)
-
-    it("flushes the trailing partial line on exit", function()
-      local f = fake_system()
-      local events, exit_code = {}, nil
-      runner.spawn("p", { system = f.fn, scheduler = sync }, function(evt)
-        events[#events + 1] = evt
-      end, function(code)
-        exit_code = code
-      end)
-
-      f.driver.stdout('{"type":"result","subtype":"success"}') -- no trailing newline
-      f.driver.finish(0)
-
-      assert.equals(1, #events)
-      assert.equals("result", events[1].kind)
-      assert.equals(0, exit_code)
-    end)
-  end)
-
-  describe("stderr + exit info", function()
-    it("accumulates stderr chunks and surfaces them in on_exit info", function()
-      local f = fake_system()
-      local info
-      runner.spawn("p", { system = f.fn, scheduler = sync }, function() end, function(_, i)
-        info = i
-      end)
-
-      f.driver.stderr("oops ")
-      f.driver.stderr("something broke\n")
-      f.driver.finish(2)
-
-      assert.equals("oops something broke\n", info.stderr)
-      assert.is_false(info.cancelled)
-    end)
-
-    it("reports signal on exit info", function()
-      local f = fake_system()
-      local code, info
-      runner.spawn("p", { system = f.fn, scheduler = sync }, function() end, function(c, i)
-        code, info = c, i
-      end)
-      f.driver.finish(nil, 15)
-      assert.equals(0, code) -- default 0 when code is nil
-      assert.equals(15, info.signal)
-    end)
-  end)
-
-  describe("cancel", function()
-    it("sends SIGTERM via sysobj:kill(15) and flips is_cancelled", function()
-      local f = fake_system()
-      local h = runner.spawn("p", { system = f.fn, scheduler = sync }, function() end, function() end)
-
-      assert.is_false(h:is_cancelled())
-      assert.is_true(h:cancel())
-      assert.equals(15, f.killed)
-      assert.is_true(h:is_cancelled())
-    end)
-
-    it("is a no-op after cancel or completion", function()
-      local f = fake_system()
-      local h = runner.spawn("p", { system = f.fn, scheduler = sync }, function() end, function() end)
-      h:cancel()
-      assert.equals(1, f.kill_calls)
-      assert.is_false(h:cancel())
-      assert.equals(1, f.kill_calls)
-    end)
-
-    it("marks cancelled=true in on_exit info", function()
-      local f = fake_system()
-      local info
-      local h = runner.spawn("p", { system = f.fn, scheduler = sync }, function() end, function(_, i)
-        info = i
-      end)
-      h:cancel()
-      f.driver.finish(nil, 15)
-      assert.is_true(info.cancelled)
-    end)
-
-    it("drops further events once cancelled", function()
-      local f = fake_system()
-      local events = {}
-      local h = runner.spawn("p", { system = f.fn, scheduler = sync }, function(evt)
-        events[#events + 1] = evt
-      end, function() end)
-
-      f.driver.stdout('{"type":"result","subtype":"success"}\n')
-      assert.equals(1, #events)
-
-      h:cancel()
-      f.driver.stdout('{"type":"result","subtype":"success"}\n') -- arrives post-cancel
-      assert.equals(1, #events) -- not 2
-    end)
-  end)
-
-  describe("spawn failure", function()
-    it("synthesizes on_exit(-1, {error=...}) when vim.system raises", function()
-      local code, info
-      local fail = function()
-        error("boom")
+      end,
+      function(code, info)
+        exit_seen = { code = code, info = info }
       end
-      runner.spawn("p", { system = fail, scheduler = sync }, function() end, function(c, i)
-        code, info = c, i
-      end)
-      assert.equals(-1, code)
-      assert.matches("boom", info.error)
-      assert.is_false(info.cancelled)
-    end)
+    )
+    return {
+      handle = handle,
+      term_runner = tr,
+      tailer = ta,
+      events = events,
+      exit = function()
+        return exit_seen
+      end,
+    }
+  end
+
+  it("starts a tailer on the resolved session file", function()
+    local r = spawn()
+    assert.equals(
+      "/fake/projects/11111111-1111-1111-1111-111111111111.jsonl",
+      r.tailer.last().started
+    )
   end)
 
-  describe("fixture round-trip", function()
-    it("yields tool_use and result events from success_multi.jsonl", function()
-      local fixture = read_fixture("tests/fixtures/claude/success_multi.jsonl")
-      local f = fake_system()
-      local events = {}
-      runner.spawn("p", { system = f.fn, scheduler = sync }, function(evt)
-        events[#events + 1] = evt
-      end, function() end)
+  it("passes session_id and snippet_name through to term_runner", function()
+    local r = spawn()
+    local o = r.term_runner.last().opts
+    assert.equals("11111111-1111-1111-1111-111111111111", o.session_id)
+    assert.equals("greet", o.snippet_name)
+    assert.same({ "--permission-mode", "acceptEdits" }, o.extra_args)
+  end)
 
-      f.driver.stdout(fixture)
-      f.driver.finish(0)
+  it("exposes session_id / bufnr / job_id / cancel on the handle", function()
+    local r = spawn()
+    assert.equals("11111111-1111-1111-1111-111111111111", r.handle:session_id())
+    assert.equals(101, r.handle:bufnr())
+    assert.equals(202, r.handle:job_id())
+    assert.is_true(r.handle:cancel())
+    assert.is_true(r.term_runner.last().cancelled)
+  end)
 
-      local has_tool_use, has_result, has_system = false, false, false
-      for _, e in ipairs(events) do
-        if e.kind == "tool_use" then
-          has_tool_use = true
-        end
-        if e.kind == "result" then
-          has_result = true
-        end
-        if e.kind == "system" then
-          has_system = true
-        end
-      end
-      assert.is_true(has_system)
-      assert.is_true(has_tool_use)
-      assert.is_true(has_result)
+  it("forwards tailer events to on_event", function()
+    local r = spawn()
+    r.tailer.last():emit({ kind = "assistant_text", text = "hi" })
+    r.tailer.last():emit({ kind = "tool_use", tool = "Edit", input = { file_path = "a.ts" } })
+    assert.equals(2, #r.events)
+    assert.equals("assistant_text", r.events[1].kind)
+    assert.equals("tool_use", r.events[2].kind)
+  end)
+
+  it("stops the tailer on PTY exit and fires on_exit exactly once", function()
+    local r = spawn()
+    r.term_runner.last().fire_exit(0, { cancelled = false })
+    assert.is_true(r.tailer.last().stopped)
+    assert.equals(0, r.exit().code)
+    assert.is_false(r.exit().info.cancelled)
+
+    -- Simulate a late second exit callback — must be ignored.
+    r.term_runner.last().opts.on_exit(99, { cancelled = false })
+    assert.equals(0, r.exit().code)
+  end)
+
+  it("propagates cancelled=true through on_exit when cancel() was called", function()
+    local r = spawn()
+    r.handle:cancel()
+    r.term_runner.last().fire_exit(nil, { cancelled = true, signal = 15 })
+    assert.is_true(r.exit().info.cancelled)
+  end)
+
+  it("rejects missing callbacks", function()
+    assert.has_error(function()
+      runner.spawn("x", {}, nil, function() end)
+    end)
+    assert.has_error(function()
+      runner.spawn("x", {}, function() end, nil)
+    end)
+    assert.has_error(function()
+      runner.spawn("", {}, function() end, function() end)
     end)
   end)
 end)

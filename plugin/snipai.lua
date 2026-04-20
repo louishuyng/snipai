@@ -129,6 +129,7 @@ vim.api.nvim_create_user_command("SnipaiHistory", function(args)
   local scope = args.args ~= "" and args.args or "project"
   require("snipai.pickers.history").open({
     history = st.history,
+    jobs = st.jobs,
     scope = scope,
     notify = st.notify,
   })
@@ -160,7 +161,8 @@ vim.api.nvim_create_user_command("SnipaiDetail", function(args)
     warn("history entry not found: " .. id)
     return
   end
-  require("snipai.ui.detail").open(entry)
+  local term_buf = st.jobs and st.jobs:get_terminal_buf(id) or nil
+  require("snipai.ui.detail_tabs").open(entry, { terminal_buf = term_buf })
 end, {
   nargs = 1,
   complete = function(arg_lead)

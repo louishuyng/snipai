@@ -34,13 +34,13 @@ This document is the map of the codebase. It covers the folder layout, what each
                         │  events (pub/sub)            │
                         └──────┬──────────────┬────────┘
                                ▼              ▼
-                ┌────────────────────┐  ┌──────────────────────┐
-                │  CLAUDE BACKEND    │  │       UI / PICKERS    │
-                │  runner (vim.system)│ │  vim.ui popups (param,│
-                │  stream-json parser│  │   detail)              │
-                │  event normalizer  │  │  Telescope pickers    │
-                └────────────────────┘  │  notify abstraction   │
-                                        └──────────────────────┘
+                ┌─────────────────────────┐  ┌────────────────────────┐
+                │  CLAUDE BACKEND         │  │       UI / PICKERS     │
+                │   term_runner (PTY)     │  │  vim.ui popups (param, │
+                │   session_tailer (JSONL)│  │   tabbed detail)       │
+                │   shared parser         │  │  Telescope pickers     │
+                │   event normalizer      │  │  notify abstraction    │
+                └─────────────────────────┘  └────────────────────────┘
 ```
 
 **The non-negotiable rules:**
@@ -77,12 +77,16 @@ snipai/
 │       │   ├── init.lua             -- public API: add_pending, finalize, list, get, clear, to_quickfix
 │       │   └── store.lua            -- JSONL read/append/prune on disk
 │       ├── claude/
-│       │   ├── runner.lua           -- spawn claude CLI via vim.system (DI seam)
-│       │   └── parser.lua           -- stream-json NDJSON parser (pure function)
+│       │   ├── runner.lua           -- thin coordinator: session-id, tailer, term_runner
+│       │   ├── term_runner.lua      -- PTY-hosted `claude` via vim.fn.termopen (DI seam)
+│       │   ├── session_tailer.lua   -- fs_poll over ~/.claude/projects/<slug>/<sid>.jsonl
+│       │   ├── session_paths.lua    -- pure cwd→transcript path mapping
+│       │   └── parser.lua           -- NDJSON → normalized events (stream-json + session)
 │       ├── ui/
 │       │   ├── popup.lua            -- vim.ui.* facade for typed-field collection
 │       │   ├── param_form.lua       -- snippet-aware form driven by ui.popup
-│       │   └── detail.lua           -- history-entry floating popup (pure renderer + window)
+│       │   ├── detail.lua           -- pure summary renderer + build_summary_buf
+│       │   └── detail_tabs.lua      -- 2-tab float (Summary + Terminal) with buffer swap
 │       ├── pickers/
 │       │   ├── running.lua          -- Telescope picker of active jobs
 │       │   └── history.lua          -- Telescope picker of history (project|all)
@@ -141,11 +145,13 @@ Each file has **one** purpose. If you find yourself reaching for a second one, i
 
 | Module | Exports | Role |
 |---|---|---|
-| `claude.runner` | `spawn(prompt, opts, on_event, on_exit)` | shells out to the `claude` CLI via `vim.system`. **This is the DI seam** — tests replace `M.spawn` with a fake that replays fixtures. |
-| `claude.parser` | `feed(bytes) -> events` | NDJSON → normalized events (`{kind, ...}`). Pure function; no state across calls. |
-| `claude.events` | normalized event type constants | shared vocabulary so `jobs/` and UI consumers agree on event shape. |
-| `jobs.job` | `Job:new()`, state machine, accumulators | one snippet run: state transitions (`pending` → `running` → `success`/`failure`/`cancelled`), progress accumulation, file-path collection. |
-| `jobs` | `spawn(snippet, params, prompt)`, `list()`, `get(id)`, `cancel(id)` | the Jobs manager. Owns the lifecycle and emits `job_*` events. |
+| `claude.runner` | `spawn(prompt, opts, on_event, on_exit)` | coordinator. Generates a session-id, resolves the on-disk transcript path via `session_paths`, starts a `session_tailer` on it, and delegates the PTY to `term_runner`. Returns a handle exposing `bufnr / job_id / session_id / cancel`. Every dependency is injected via `opts` for tests. |
+| `claude.term_runner` | `spawn(opts) -> handle` | PTY host. Creates a hidden scratch buffer, runs `claude --session-id <uuid> --name <snippet> …` via `vim.fn.termopen`, and sends the rendered prompt with `chansend` so the session stays alive for follow-up turns. All Neovim primitives (`nvim_create_buf`, `termopen`, `chansend`, `jobstop`, `nvim_buf_call`) are injected via `opts.primitives`. |
+| `claude.session_tailer` | `new(opts)`, `:start(path)`, `:tick()`, `:stop()` | tracks a byte offset on the session JSONL and feeds newly-written bytes into `claude.parser`. The real backend uses `vim.uv.fs_poll` at 250 ms; tests pass a synchronous no-op poller and drive `:tick()` themselves. |
+| `claude.session_paths` | `project_dir(opts)`, `session_file(opts)` | pure mapping between a working directory and Claude Code's on-disk transcript location (`~/.claude/projects/<cwd-slug>/<session-id>.jsonl`). |
+| `claude.parser` | `parse(bytes)`, `new():feed(chunk)`, `:flush()` | NDJSON → normalized events (`{kind, ...}`). Accepts both stream-json shape (block content nested in `message`) and session-JSONL shape (top-level `tool_use` / `tool_result`, `assistant.content` carrying blocks). Pure. |
+| `jobs.job` | `Job:new()`, 5-state lifecycle, progress accumulator | one snippet run: transitions `pending → running ⇄ idle → complete / cancelled / error`. `idle` flips on a parser `result` event and back on the next non-result event, so the UI knows whether Claude is actively producing output or waiting for the next user message. Holds `files_changed`, `session_id`, and exposes `terminal_buf()` for the detail popup. |
+| `jobs` | `spawn(snippet, params, prompt)`, `list()`, `get(id)`, `cancel(id)`, `cancel_all()`, `get_terminal_buf(id)` | the Jobs manager. Owns the lifecycle and emits `job_*` events. `get_terminal_buf` lets the detail popup attach to the active PTY without reaching into private Job state. |
 | `history.store` | `append(entry)`, `read_all()`, `prune(max)` | JSONL on-disk storage. Pure-ish: takes a path, returns entries. Atomic append via O_APPEND. |
 | `history` | `add_pending`, `finalize`, `list`, `get`, `clear`, `to_quickfix` | public history API. Uses `store` for persistence; `to_quickfix(id)` builds one qf item per touched file (lnum=1 since Edit events carry no line numbers) and sets a `snipai: <snippet>` title. `setqflist` is injected for tests. |
 
@@ -155,14 +161,15 @@ Each file has **one** purpose. If you find yourself reaching for a second one, i
 |---|---|---|
 | `ui.popup` | `collect(fields, opts)` | sequential `vim.ui.input` / `vim.ui.select` chain for a list of typed fields; boolean is a two-option select mapped back to Lua booleans; both `vim.ui.*` fns are injectable for tests and alternate backends. |
 | `ui.param_form` | `open(snippet, opts)` | snippet-aware layer: builds an ordered field list from `snippet.parameter`, delegates to `ui.popup`, resolves defaults and validates via `params.validate_all`, surfaces errors through the notifier, guarantees `on_submit` fires only with valid values. |
-| `ui.detail` | `render(entry) -> { lines, title }`, `open(entry, opts?)` | history-entry detail popup. `render` is a pure function returning section-assembled lines (status, meta, params, files, prompt, stderr); missing optional fields drop their rows, `Started` / `Finished` always render and degrade to `-`. `open` wraps the output in a centered readonly scratch buffer with `q` / `<Esc>` to close. |
+| `ui.detail` | `render(entry) -> { lines, title }`, `build_summary_buf(entry, api?)`, `open(entry, opts?)` | history-entry summary. `render` is a pure function returning section-assembled lines (status, meta, params, files, prompt, stderr); status `"success"` is rendered as `[complete]` so legacy rows read with current terminology. `build_summary_buf` is the single-tab buffer factory reused by `ui.detail_tabs`. |
+| `ui.detail_tabs` | `tab_bar_line(active)`, `open(entry, opts)` | tabbed float (Summary + Terminal). `<Tab>` / `<S-Tab>` swap the float's underlying buffer via `nvim_win_set_buf` — no window recreation. When the entry's PTY is gone (historical row, or the buffer was closed), the Terminal tab falls back to a read-only placeholder so the keybind never crashes. |
 
 ### Pickers (Telescope-backed; soft-fail without it)
 
 | Module | Exports | Role |
 |---|---|---|
-| `pickers.running` | `format_row(job, now_ms)` (pure), `open(opts)` | active-job picker — name, status badge, elapsed duration, short id, file basename. `<CR>` → `ui.detail.open` for the job's history row; `<C-c>` cancels. Point-in-time snapshot; live refresh scheduled for v0.2.0. |
-| `pickers.history` | `format_row(entry)` (pure), `open(opts)` | history picker scoped by `opts.scope` (`project` default, `all`). Rows sorted newest-first with status glyphs (`+` / `x` / `~` / `…`). `<CR>` opens detail; `<C-q>` calls `history:to_quickfix(id)` then notifies the file count. `<C-r>` replay and `<C-d>` delete scoped to v0.2.0. |
+| `pickers.running` | `format_row(job, now_ms)` (pure), `_glyph(status)` (pure), `open(opts)` | active-job picker. Row is `<glyph> <name> <duration> <shortId> (<file>)` where `<glyph>` cycles `… running / ◦ idle / ✓ complete / ✗ cancelled / ! error`. `<CR>` opens the tabbed detail popup with the job's live terminal buffer attached; `<C-c>` cancels. Snapshot-on-open; live refresh lands in v0.3.0. |
+| `pickers.history` | `format_row(entry)` (pure), `open(opts)` | history picker scoped by `opts.scope` (`project` default, `all`). Rows sorted newest-first with the same 5-state glyph set. `<CR>` opens detail (attaches a terminal tab when the entry's session is still active); `<C-q>` calls `history:to_quickfix(id)` then notifies the file count. `<C-r>` replay and `<C-d>` delete scoped to v0.3.0. |
 
 Both picker modules accept `opts.telescope` with three modes: `nil` auto-resolves via `pcall`, `false` forces "absent" (test seam), a table is used as a pre-built bundle. `format_row` is unit-tested; the Telescope wrapper is smoke-only per the design spec.
 
@@ -193,7 +200,10 @@ The rule is simple: **arrows point downward in the Layers diagram; never upward.
 |---|---|---|
 | `config`, `params`, `events`, `claude/parser` | standard library only | anything else in the plugin |
 | `snippet`, `registry` | `config`, `params` | UI, pickers, adapters, jobs, history |
-| `claude/runner` | `vim.system` (or plenary.job fallback), `claude/parser` | jobs, history, UI |
+| `claude/session_paths`, `claude/parser` | standard library only | anything else in the plugin |
+| `claude/session_tailer` | `claude/parser`, `vim.uv` (injectable) | jobs, history, UI |
+| `claude/term_runner` | `vim.api` / `vim.fn` (injectable) | jobs, history, UI, parser |
+| `claude/runner` | `claude/{session_paths, session_tailer, term_runner}` | jobs, history, UI |
 | `jobs/*` | `claude/*`, `events`, `snippet`, `notify` | UI, pickers, adapters |
 | `history/*` | filesystem (`vim.uv`, injectable fs), `events` | UI, pickers, adapters, jobs |
 | `ui/*`, `sources/*` | core modules + their own runtime dep (`vim.ui` / cmp) | each other, pickers (UI should not require pickers; sources should not require UI) |
@@ -249,34 +259,53 @@ jobs.spawn(snippet, values, ctx)
   ├─► events.emit("job_started", job)  -- statusline spinner starts
   ▼
 claude/runner.spawn(prompt, claude_opts)
-  │   vim.system({
-  │     "claude", "-p", prompt,
-  │     "--output-format", "stream-json", "--verbose",
-  │     "--permission-mode", "acceptEdits",
-  │     "--setting-sources", "",
+  │   uuid = generated RFC4122-v4 session-id
+  │   path = ~/.claude/projects/<cwd-slug>/<uuid>.jsonl
+  │
+  │   session_tailer:start(path)        -- fs_poll @ 250ms
+  │   term_runner.spawn({
+  │     prompt, session_id=uuid, snippet_name, extra_args,
+  │     on_exit = (code, info) → tailer:stop(); run on_exit
   │   })
+  │     vim.api.nvim_create_buf(false, true)     -- hidden scratch
+  │     vim.fn.termopen({
+  │       "claude", "--session-id", uuid, "--name", snippet,
+  │       "--permission-mode", "acceptEdits",
+  │       "--setting-sources", "",
+  │     }, { on_exit = … })
+  │     vim.fn.chansend(job_id, prompt .. "\r")  -- first turn
   ▼
-claude/parser.feed(chunk) yields normalized events:
-    {kind="system",   subtype="init", model, tools}
+session_tailer reads newly-appended JSONL bytes → claude/parser.feed:
+    {kind="assistant_text", text="..."}
     {kind="tool_use", tool="Edit",  input={file_path=...}}
     {kind="tool_use", tool="Write", input={file_path=...}}
-    {kind="assistant_text", text="..."}
-    {kind="result",   status="success", usage={...}}
+    {kind="result",   status="success"}           -- turn done → idle
+    {kind="assistant_text", text="..."}           -- next turn → running
   │
   ▼ job:_on_event(evt)
+    • result events flip running → idle; any other event flips back
     • filters Edit/Write/MultiEdit into job.files_changed[] (deduped)
     • events.emit("job_progress", job, evt)
   │
-  ▼ process exit  ─► job:_on_exit(code, info)
+  ▼ buffer_refresh observes job_progress and runs :checktime on
+    each new file the moment it first appears — so long sessions
+    reload the user's buffers between turns, not only on exit.
+  │
+  ▼ PTY exit (user /exit, :bd!, or SIGTERM) ─► term_runner on_exit
+    runner stops tailer → fires on_exit(code, { cancelled }) ─►
+      jobs.job:_on_exit(code, info)
+    • classify: code==0 → complete; cancelled flag → cancelled; else error
     • history.finalize(id, { status, duration_ms, files_changed, stderr, ... })
     • notifier finishes the progress toast
     • events.emit("job_done", job, exit_code)
   ▼
-Subscribers fire on job_done:
-  • init.lua → refresh_buffers(files_changed): :checktime per touched
-    buffer so open buffers reload externally-written content
-  • statusline.lua → decrements active_count, stops spinner timer
-    when 0, triggers final :redrawstatus so the indicator clears
+Subscribers that fire throughout:
+  • buffer_refresh → :checktime per newly-observed file (on job_progress
+    AND job_done)
+  • statusline → decrements active_count, stops spinner timer when 0,
+    triggers final :redrawstatus so the indicator clears
+  • running picker (if open) → re-reads job state on next refresh;
+    live-refresh subscription lands in v0.3.0
 ```
 
 **Invariants to preserve when changing this flow:**
@@ -285,7 +314,23 @@ Subscribers fire on job_done:
 2. **Snippet trigger returns immediately.** Every step past `jobs.spawn` is async.
 3. **`files_changed` is authoritative from the parser.** Do not re-derive it from git diff or filesystem scanning.
 4. **Cancellation shares the `finalize` code path.** A cancelled job is a normal finalize with `status = "cancelled"`.
-5. **Progress events are structured.** UI consumers see `{kind="tool_use", ...}`, not scraped stdout lines — so future backends can emit the same shape.
+5. **Progress events are structured.** UI consumers see `{kind="tool_use", ...}`, not scraped stdout lines or PTY output — so future backends can emit the same shape.
+6. **One history entry per session.** A long, multi-turn session stays on one row; `files_changed` accumulates across turns.
+
+### Lifecycle states
+
+The five tokens a job's `status` carries:
+
+| State | Meaning | Reachable from | Terminal? |
+|---|---|---|---|
+| `pending` | constructed, not started | — | no |
+| `running` | PTY alive; last parser event was not `result` (Claude is producing output or a tool is running) | `pending`, `idle` | no |
+| `idle` | PTY alive; last event was `result` (Claude has finished its turn and is waiting for the next message — you can reopen the terminal and type) | `running` | no |
+| `complete` | PTY exited cleanly (user `/exit`ed or closed the terminal) | `running`, `idle` | yes |
+| `cancelled` | PTY killed via `jobs:cancel()` (SIGTERM from `:SnipaiCancel` or `<C-c>` in the running picker) | any non-terminal state | yes |
+| `error` | PTY exited non-zero without a cancel | `running`, `idle` | yes |
+
+Legacy entries written before the lifecycle rename carry `status = "success"`; UI layers (`ui.detail`, `pickers.running`, `pickers.history`) treat it as an alias for `complete`.
 
 ---
 

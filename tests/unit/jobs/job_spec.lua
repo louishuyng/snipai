@@ -254,8 +254,8 @@ describe("snipai.jobs.job", function()
     end)
   end)
 
-  describe("success path", function()
-    it("finalizes history with status=success, duration, and files_changed", function()
+  describe("complete path", function()
+    it("finalizes history with status=complete, duration, and files_changed", function()
       local job, deps = make_job({
         id = counter_id("r"),
         now = fake_clock(1000, 500),
@@ -273,9 +273,9 @@ describe("snipai.jobs.job", function()
       })
       spawn.on_exit(0, { cancelled = false, stderr = "", parser_errors = {}, signal = nil })
 
-      assert.equals("success", job:status())
+      assert.equals("complete", job:status())
       local entry = deps.history:get("r-1")
-      assert.equals("success", entry.status)
+      assert.equals("complete", entry.status)
       assert.equals(0, entry.exit_code)
       assert.are.same({ "src/a.ts", "src/a.test.ts" }, entry.files_changed)
       -- now() fired at: start(1000) start_at_ms=1000; history now fires during
@@ -384,6 +384,77 @@ describe("snipai.jobs.job", function()
       local entry = deps.history:get(job:id())
       assert.equals("boom", entry.runner_error)
       assert.equals("error", entry.status)
+    end)
+  end)
+
+  describe("running ↔ idle transitions", function()
+    it("flips to idle on a parser result event", function()
+      local job, deps = make_job()
+      job:start()
+      assert.equals("running", job:status())
+      deps.runner.last().on_event({ kind = "result", status = "success" })
+      assert.equals("idle", job:status())
+    end)
+
+    it("flips back to running on the next non-result event", function()
+      local job, deps = make_job()
+      job:start()
+      local spawn = deps.runner.last()
+      spawn.on_event({ kind = "result", status = "success" })
+      spawn.on_event({ kind = "assistant_text", text = "next turn" })
+      assert.equals("running", job:status())
+    end)
+
+    it("treats idle as a live state for is_running / is_done", function()
+      local job, deps = make_job()
+      job:start()
+      deps.runner.last().on_event({ kind = "result", status = "success" })
+      assert.is_true(job:is_running())
+      assert.is_false(job:is_done())
+    end)
+  end)
+
+  describe("session_id", function()
+    it("threads a runner-minted session_id into the history entry", function()
+      local runner = {
+        generate_session_id = function()
+          return "11111111-1111-1111-1111-111111111111"
+        end,
+        spawn = function(_, opts, _on_event, _on_exit)
+          local sid = opts.session_id
+          local h = {}
+          function h:cancel()
+            return true
+          end
+          function h:session_id()
+            return sid
+          end
+          return h
+        end,
+      }
+      local job, deps = make_job({ runner = runner })
+      job:start()
+      assert.equals("11111111-1111-1111-1111-111111111111", job:session_id())
+      local entry = deps.history:get(job:id())
+      assert.equals("11111111-1111-1111-1111-111111111111", entry.session_id)
+    end)
+
+    it("exposes the handle's bufnr via terminal_buf", function()
+      local runner = {
+        spawn = function()
+          local h = {}
+          function h:cancel()
+            return true
+          end
+          function h:bufnr()
+            return 77
+          end
+          return h
+        end,
+      }
+      local job = make_job({ runner = runner })
+      job:start()
+      assert.equals(77, job:terminal_buf())
     end)
   end)
 

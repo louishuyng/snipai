@@ -55,11 +55,16 @@ local function format_timestamp(ms)
   return s
 end
 
+-- 5-state glyphs aligned with pickers/running. 'success' is accepted
+-- as an alias for 'complete' to keep legacy history rows rendering
+-- with current terminology.
 local STATUS_GLYPH = {
-  success = "+",
-  error = "x",
-  cancelled = "~",
   running = "…",
+  idle = "◦",
+  complete = "✓",
+  success = "✓",
+  cancelled = "✗",
+  error = "!",
 }
 
 -- Example row:
@@ -186,7 +191,8 @@ function M.open(opts)
     return
   end
 
-  local detail = opts.detail or require("snipai.ui.detail")
+  local detail_tabs = opts.detail or require("snipai.ui.detail_tabs")
+  local jobs_mgr = opts.jobs -- optional; enables terminal tab for still-active entries
 
   ts.pickers
     .new({}, {
@@ -207,7 +213,8 @@ function M.open(opts)
           local selected = ts.action_state.get_selected_entry()
           ts.actions.close(prompt_bufnr)
           if selected and selected.value then
-            detail.open(selected.value)
+            local term_buf = jobs_mgr and jobs_mgr:get_terminal_buf(selected.value.id) or nil
+            detail_tabs.open(selected.value, { terminal_buf = term_buf })
           end
         end)
 

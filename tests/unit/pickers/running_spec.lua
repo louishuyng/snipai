@@ -51,7 +51,7 @@ end
 
 describe("snipai.pickers.running", function()
   describe("format_row", function()
-    it("renders name, status, duration, short id, and file basename", function()
+    it("renders glyph, name, duration, short id, and file basename", function()
       local job = make_job({
         id = "abcdef1234",
         snippet_name = "scaffold",
@@ -60,11 +60,21 @@ describe("snipai.pickers.running", function()
         cursor_file = "/work/proj/src/init.lua",
       })
       local row = picker.format_row(job, 3100)
+      assert.matches("^…", row) -- running glyph leads the row
       assert.matches("scaffold", row)
-      assert.matches("%[running%]", row)
       assert.matches("2%.1s", row)
       assert.matches("abcdef12", row)
       assert.matches("%(init%.lua%)", row)
+    end)
+
+    it("exposes one glyph per state via _glyph", function()
+      assert.equals("…", picker._glyph("running"))
+      assert.equals("◦", picker._glyph("idle"))
+      assert.equals("✓", picker._glyph("complete"))
+      assert.equals("✓", picker._glyph("success")) -- legacy alias
+      assert.equals("✗", picker._glyph("cancelled"))
+      assert.equals("!", picker._glyph("error"))
+      assert.equals("?", picker._glyph("weird"))
     end)
 
     it("omits duration when started_at or now is missing", function()
@@ -88,9 +98,9 @@ describe("snipai.pickers.running", function()
       assert.matches("%(unknown%)", picker.format_row(job, 1))
     end)
 
-    it("uses the status method verbatim in brackets", function()
-      local job = make_job({ snippet_name = "s", status = "cancelled" })
-      assert.matches("%[cancelled%]", picker.format_row(job, 1))
+    it("leads with the correct glyph per status", function()
+      local j = make_job({ snippet_name = "s", status = "cancelled" })
+      assert.matches("^✗", picker.format_row(j, 1))
     end)
   end)
 

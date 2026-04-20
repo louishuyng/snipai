@@ -1,115 +1,52 @@
--- Claude CLI runner: spawns `claude -p <prompt> --output-format stream-json
--- --verbose`, feeds stdout chunks through snipai.claude.parser, and emits
--- normalized events to the caller.
+-- Coordinates the PTY-hosted `claude` session and the on-disk session
+-- transcript tailer. Callers still see the v0.1.0 contract:
 --
--- Contract:
 --   spawn(prompt, opts, on_event, on_exit) -> handle
---     on_event(evt)     fires per parsed event (may fan multiple per chunk)
---     on_exit(code,info) fires exactly once; info = {
---                          signal, stderr, parser_errors, cancelled, error }
---     handle:cancel()    SIGTERMs the process; on_exit still fires
+--     on_event(evt)      fires per parsed event (from the session JSONL)
+--     on_exit(code,info) fires exactly once; info = { cancelled, signal? }
+--     handle:cancel()    SIGTERMs the PTY
+--     handle:bufnr()     PTY's scratch terminal buffer
+--     handle:session_id() claude --session-id <uuid>
 --     handle:is_cancelled() / handle:is_done()
 --
--- Injection seams (all in opts; fall back to live vim.* in production):
---   opts.system      replaces vim.system for tests
---   opts.scheduler   replaces vim.schedule (pass-through fn in sync tests)
---   opts.parser_new  replaces snipai.claude.parser.new (for parser stubs)
---
--- vim.system streams stdout via its `stdout` callback; when that callback
--- is set, out.stdout on completion is empty, so the runner owns its own
--- stderr buffer and parser-error accumulator.
---
--- Cancellation semantics: once :cancel() has been called, further parsed
--- events are dropped even if late stdout arrives before SIGTERM takes
--- effect. on_exit still fires, with cancelled=true in info.
+-- Injection seams (all in opts; fall back to module defaults):
+--   opts.term_runner     replaces snipai.claude.term_runner
+--   opts.session_paths   replaces snipai.claude.session_paths
+--   opts.tailer          replaces snipai.claude.session_tailer
+--   opts.tailer_fs       forwarded to tailer.new{ fs = ... }
+--   opts.tailer_poll     forwarded to tailer.new{ poll_start = ... }
+--   opts.session_id_gen  () -> uuid; defaults to an RFC4122-v4-ish string
+--   opts.cwd             defaults to vim.loop.cwd()
+--   opts.home            defaults to $HOME
+--   opts.cmd             claude binary (defaults to "claude")
+--   opts.snippet_name    --name <label>; defaults to "snipai"
+--   opts.extra_args      appended after --session-id / --name
 
-local parser_mod = require("snipai.claude.parser")
+local tailer_mod_default = require("snipai.claude.session_tailer")
+local term_runner_default = require("snipai.claude.term_runner")
+local session_paths_default = require("snipai.claude.session_paths")
 
 local M = {}
 
-local DEFAULT_CMD = "claude"
-local STREAM_ARGS = { "--output-format", "stream-json", "--verbose" }
-
--- ---------------------------------------------------------------------------
--- argv
--- ---------------------------------------------------------------------------
-
-local function build_argv(prompt, opts)
-  local argv = { opts.cmd or DEFAULT_CMD, "-p", prompt }
-  for _, a in ipairs(STREAM_ARGS) do
-    argv[#argv + 1] = a
-  end
-  if type(opts.extra_args) == "table" then
-    for _, a in ipairs(opts.extra_args) do
-      argv[#argv + 1] = a
-    end
-  end
-  return argv
+-- RFC 4122 v4-ish UUID; not cryptographic, but distinct enough for a
+-- Claude Code session id over the lifetime of a single Neovim process.
+function M.generate_session_id()
+  math.randomseed(os.time())
+  local tpl = "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx"
+  return (
+    tpl:gsub("[xy]", function(c)
+      local v = (c == "x") and math.random(0, 0xf) or math.random(8, 0xb)
+      return string.format("%x", v)
+    end)
+  )
 end
 
--- ---------------------------------------------------------------------------
--- Defaults
--- ---------------------------------------------------------------------------
-
-local function default_scheduler(fn)
-  if vim and vim.schedule then
-    vim.schedule(fn)
-  else
-    fn()
+local function default_cwd()
+  if vim and vim.loop and vim.loop.cwd then
+    return vim.loop.cwd()
   end
+  return "."
 end
-
-local function resolve_system(opts)
-  if opts.system ~= nil then
-    return opts.system
-  end
-  if vim and vim.system then
-    return vim.system
-  end
-  return nil
-end
-
--- ---------------------------------------------------------------------------
--- Handle
--- ---------------------------------------------------------------------------
-
-local Handle = {}
-Handle.__index = Handle
-
-function Handle:cancel()
-  if self._cancelled or self._done then
-    return false
-  end
-  self._cancelled = true
-  if self._sysobj and type(self._sysobj.kill) == "function" then
-    -- SIGTERM (15). Job layer will see the on_exit callback flip
-    -- cancelled=true and route through history.finalize as "cancelled".
-    self._sysobj:kill(15)
-  end
-  return true
-end
-
-function Handle:is_cancelled()
-  return self._cancelled == true
-end
-
-function Handle:is_done()
-  return self._done == true
-end
-
-function Handle:pid()
-  if self._sysobj and type(self._sysobj.pid) == "function" then
-    return self._sysobj:pid()
-  end
-  if self._sysobj and type(self._sysobj.pid) == "number" then
-    return self._sysobj.pid
-  end
-  return nil
-end
-
--- ---------------------------------------------------------------------------
--- spawn
--- ---------------------------------------------------------------------------
 
 function M.spawn(prompt, opts, on_event, on_exit)
   opts = opts or {}
@@ -117,104 +54,66 @@ function M.spawn(prompt, opts, on_event, on_exit)
   assert(type(on_event) == "function", "on_event must be a function")
   assert(type(on_exit) == "function", "on_exit must be a function")
 
-  local system = resolve_system(opts)
-  assert(type(system) == "function", "vim.system not available (and none injected via opts.system)")
-  local scheduler = opts.scheduler or default_scheduler
-  local parser_new = opts.parser_new or parser_mod.new
+  local tr = opts.term_runner or term_runner_default
+  local sp = opts.session_paths or session_paths_default
+  local tailer_mod = opts.tailer or tailer_mod_default
+  local uuid = opts.session_id
+    or (opts.session_id_gen and opts.session_id_gen())
+    or M.generate_session_id()
+  local path = sp.session_file({
+    session_id = uuid,
+    cwd = opts.cwd or default_cwd(),
+    home = opts.home,
+  })
 
-  local parser = parser_new()
-  local handle = setmetatable({
-    _cancelled = false,
-    _done = false,
-  }, Handle)
+  local tailer = tailer_mod.new({
+    fs = opts.tailer_fs,
+    poll_start = opts.tailer_poll,
+    on_event = on_event,
+  })
+  tailer:start(path)
 
-  local stderr_parts = {}
-  local parser_errors = {}
+  local finished = false
+  local term_handle = tr.spawn({
+    prompt = prompt,
+    session_id = uuid,
+    snippet_name = opts.snippet_name or "snipai",
+    claude_cmd = opts.cmd,
+    extra_args = opts.extra_args or {},
+    primitives = opts.term_primitives,
+    on_exit = function(code, info)
+      if finished then
+        return
+      end
+      finished = true
+      tailer:stop()
+      on_exit(code, info or {})
+    end,
+  })
 
-  local function emit(evt)
-    if handle._cancelled then
-      return
-    end
-    scheduler(function()
-      on_event(evt)
-    end)
+  -- Wrap the term handle with session-id + tailer-stop semantics without
+  -- rewriting the Handle prototype from term_runner. Delegate everything
+  -- else straight through.
+  local handle = {}
+  function handle:cancel()
+    return term_handle:cancel()
   end
-
-  local function drain(events, errs)
-    for _, e in ipairs(events or {}) do
-      emit(e)
-    end
-    for _, e in ipairs(errs or {}) do
-      parser_errors[#parser_errors + 1] = e
-    end
+  function handle:bufnr()
+    return term_handle:bufnr()
   end
-
-  local function on_stdout(err, data)
-    if err then
-      stderr_parts[#stderr_parts + 1] = ("[stdout callback error] %s\n"):format(tostring(err))
-      return
-    end
-    if data == nil then
-      return -- EOF; flush happens in on_exit
-    end
-    drain(parser:feed(data))
+  function handle:job_id()
+    return term_handle:job_id()
   end
-
-  local function on_stderr(err, data)
-    if err or data == nil then
-      return
-    end
-    stderr_parts[#stderr_parts + 1] = data
+  function handle:session_id()
+    return uuid
   end
-
-  local function finalize(completed)
-    drain(parser:flush())
-    handle._done = true
-    local code
-    if type(completed) == "table" then
-      code = completed.code
-    else
-      code = completed
-    end
-    local signal = type(completed) == "table" and completed.signal or nil
-    scheduler(function()
-      on_exit(code or 0, {
-        signal = signal,
-        stderr = table.concat(stderr_parts, ""),
-        parser_errors = parser_errors,
-        cancelled = handle._cancelled,
-      })
-    end)
+  function handle:is_cancelled()
+    return term_handle:is_cancelled()
   end
-
-  local ok, sysobj_or_err = pcall(system, build_argv(prompt, opts), {
-    stdout = on_stdout,
-    stderr = on_stderr,
-    text = true,
-    timeout = opts.timeout_ms,
-  }, finalize)
-
-  if not ok then
-    -- Synthesize a failure on_exit so callers see the full lifecycle even
-    -- when vim.system itself raises (e.g. argv validation blew up).
-    handle._done = true
-    scheduler(function()
-      on_exit(-1, {
-        error = tostring(sysobj_or_err),
-        stderr = "",
-        parser_errors = {},
-        cancelled = false,
-      })
-    end)
-    return handle
+  function handle:is_done()
+    return term_handle:is_done()
   end
-
-  handle._sysobj = sysobj_or_err
   return handle
 end
-
--- Exposed so tests (and fake runners) can see the same argv template.
-M._STREAM_ARGS = STREAM_ARGS
-M._build_argv = build_argv
 
 return M

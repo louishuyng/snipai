@@ -265,7 +265,7 @@ describe("snipai.jobs (manager)", function()
       deps.runner.spawns[1].on_exit(0, { cancelled = false, stderr = "", parser_errors = {} })
 
       local final = deps.history:get(job:id())
-      assert.equals("success", final.status)
+      assert.equals("complete", final.status)
       assert.are.same({ "a.ts" }, final.files_changed)
     end)
   end)

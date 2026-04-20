@@ -37,11 +37,15 @@ into the quickfix list (see |snipai-mappings|).
 ==============================================================================
 2. REQUIREMENTS                                          *snipai-requirements*
 
-  - Neovim v0.10 or newer (for `vim.system`, `vim.uv`, `vim.islist`)
-  - Claude Code CLI on `$PATH` (or point `claude.cmd` at an absolute path)
-  - hrsh7th/nvim-cmp (required until blink.cmp adapter lands in v0.2.0)
+  - Neovim v0.10 or newer (for `vim.fn.termopen`, `vim.uv.fs_poll`,
+    `vim.islist`)
+  - Claude Code CLI on `$PATH`, recent enough to accept `--session-id`
+    (or point `claude.cmd` at an absolute path)
+  - hrsh7th/nvim-cmp (required until blink.cmp adapter lands in v0.3.0)
   - nvim-telescope/telescope.nvim (for |:SnipaiRunning|, |:SnipaiHistory|)
-  - nvchad/volt (popup UI for the parameter form and detail view)
+  - OPTIONAL: stevearc/dressing.nvim, folke/snacks.nvim, or
+    nvim-telescope/telescope-ui-select.nvim to upgrade the |vim.ui.input|
+    / |vim.ui.select| parameter form
   - OPTIONAL: rcarriga/nvim-notify or j-hui/fidget.nvim for richer
     progress notifications; stock |vim.notify()| is used otherwise.
 
@@ -186,9 +190,12 @@ still load.
                             and `<leader>sH` (all).
 
                                                                *:SnipaiDetail*
-:SnipaiDetail {id}          Open a detail popup for a history entry (shows
-                            the rendered prompt, parameters, status,
-                            duration, and `files_changed`).
+:SnipaiDetail {id}          Open the tabbed detail popup (Summary +
+                            Terminal). Summary shows the rendered prompt,
+                            parameters, status, duration, and
+                            `files_changed`. Terminal attaches to the
+                            session's live PTY buffer when the entry is
+                            still active. <Tab> / <S-Tab> swap tabs.
 
                                                            *:SnipaiToQuickfix*
 :SnipaiToQuickfix {id}      Push a history entry's `files_changed` into the
@@ -196,9 +203,11 @@ still load.
                             history picker.
 
                                                                *:SnipaiCancel*
-:SnipaiCancel {id}          Cancel a running job (SIGTERM the Claude
-                            subprocess). History entry is finalized with
-                            status `cancelled`.
+:SnipaiCancel {id}          Cancel a running session (SIGTERM the PTY-
+                            hosted `claude` via |vim.fn.jobstop()|).
+                            History entry is finalized with status
+                            `cancelled`; any files captured before the
+                            kill are preserved.
 
                                                                *:SnipaiReload*
 :SnipaiReload               Re-read all JSON snippet configs. Useful after
@@ -219,17 +228,51 @@ Global (active unless `keymaps = false` in |snipai.setup()|):
 
 Running picker (buffer-local):
 
-  <CR>              open detail popup
-  <C-c>             cancel the selected job
+  <CR>              open tabbed detail popup (Summary + Terminal)
+  <C-c>             cancel the selected session
 
 History picker (buffer-local):
 
-  <CR>              open detail popup
+  <CR>              open tabbed detail popup
   <C-q>             push `files_changed` to quickfix, close picker
   <C-r>             replay the snippet with its original parameters
-  <C-d>             delete the history entry
+                    (v0.3.0 — not yet wired)
+  <C-d>             delete the history entry (v0.3.0 — not yet wired)
+
+Detail popup (buffer-local):
+
+  <Tab>  / <S-Tab>  swap between Summary and Terminal tabs
+  q     / <Esc>     close the popup
+
+In the Terminal tab, press `i` for Terminal-Insert mode and type a
+follow-up message to Claude. `<C-c>` interrupts a generating turn;
+`/exit` ends the session cleanly.
 
 Override any default via `setup({ keymaps = { … } })`. See |snipai-config|.
+
+                                                        *snipai-lifecycle*
+Every snippet spawns a persistent `claude` session under a hidden PTY.
+The session's state is tracked in one of five tokens, shown by glyph
+in both pickers:
+
+  … running     PTY alive; Claude is producing output or running a tool
+  ◦ idle        PTY alive; Claude finished its turn and is waiting for
+                your next message
+  ✓ complete    PTY exited 0 (user `/exit` or closed the terminal)
+  ✗ cancelled   `:SnipaiCancel` or `:bd!` killed the PTY
+  ! error       PTY exited non-zero without a cancel
+
+One session = one history entry, no matter how many turns you take.
+`files_changed` and `duration_ms` accumulate across all turns.
+
+Re-triggering the same snippet while an earlier session is still open
+always spawns a NEW session with a fresh UUID and history row — it
+never resumes an existing one. Concurrent sessions are legal.
+Explicitly resuming an old session (`claude --resume <uuid>`) lands in
+v0.3.0 as `<C-r>` in the history picker.
+
+When Neovim quits, a `VimLeavePre` autocmd soft-stops every active
+session so no orphan `claude` processes survive the editor.
 
 ==============================================================================
 8. CONFIGURATION                                             *snipai-config*

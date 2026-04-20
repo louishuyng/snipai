@@ -128,8 +128,18 @@ function RECORD_HANDLERS.system(record)
   }
 end
 
+-- Stream-json wraps content under record.message.content; Claude Code's
+-- on-disk session transcripts (~/.claude/projects/<slug>/<sid>.jsonl)
+-- sometimes carry content directly at record.content. Support both.
+local function message_content(record)
+  if record.message and record.message.content ~= nil then
+    return record.message.content
+  end
+  return record.content
+end
+
 function RECORD_HANDLERS.assistant(record)
-  local content = record.message and record.message.content
+  local content = message_content(record)
   if type(content) == "string" then
     return { { kind = "assistant_text", text = content } }
   end
@@ -137,8 +147,42 @@ function RECORD_HANDLERS.assistant(record)
 end
 
 function RECORD_HANDLERS.user(record)
-  local content = record.message and record.message.content
-  return expand_blocks(content)
+  return expand_blocks(message_content(record))
+end
+
+-- Session transcripts emit tool_use / tool_result at the top level
+-- (not nested inside assistant/user content blocks). Normalize to the
+-- same event shape so downstream consumers stay shape-agnostic.
+function RECORD_HANDLERS.tool_use(record)
+  return {
+    {
+      kind = "tool_use",
+      id = record.id,
+      tool = record.name or record.tool,
+      input = record.input or {},
+    },
+  }
+end
+
+function RECORD_HANDLERS.tool_result(record)
+  local content = record.content
+  if type(content) == "table" then
+    local parts = {}
+    for _, c in ipairs(content) do
+      if type(c) == "table" and c.type == "text" then
+        parts[#parts + 1] = c.text or ""
+      end
+    end
+    content = table.concat(parts, "\n")
+  end
+  return {
+    {
+      kind = "tool_result",
+      tool_use_id = record.tool_use_id,
+      is_error = record.is_error == true,
+      content = content,
+    },
+  }
 end
 
 function RECORD_HANDLERS.result(record)

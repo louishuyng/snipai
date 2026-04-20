@@ -91,11 +91,16 @@ end
 -- Pure renderer
 -- ---------------------------------------------------------------------------
 
+-- 'success' is the legacy token (pre-v0.2.0) for what the 5-state
+-- lifecycle now calls 'complete'. Both map to the same badge so old
+-- history rows render with current terminology.
 local STATUS_BADGE = {
-  success = "[success]",
-  error = "[error]",
-  cancelled = "[cancelled]",
+  success = "[complete]",
+  complete = "[complete]",
   running = "[running]",
+  idle = "[idle]",
+  cancelled = "[cancelled]",
+  error = "[error]",
 }
 
 local function status_line(entry)
@@ -234,17 +239,25 @@ local function clamp(v, lo, hi)
   return v
 end
 
-function M.open(entry, opts)
-  opts = opts or {}
-  local api = opts.api or vim.api
+-- Builds the summary scratch buffer used as the first tab in
+-- ui.detail_tabs. Kept here so the pure renderer and the buffer-
+-- construction live in one place.
+function M.build_summary_buf(entry, api)
+  api = api or vim.api
   local rendered = M.render(entry)
-
   local buf = api.nvim_create_buf(false, true)
   api.nvim_buf_set_lines(buf, 0, -1, false, rendered.lines)
   api.nvim_buf_set_option(buf, "modifiable", false)
   api.nvim_buf_set_option(buf, "readonly", true)
   api.nvim_buf_set_option(buf, "bufhidden", "wipe")
   api.nvim_buf_set_option(buf, "filetype", "markdown")
+  return buf, rendered
+end
+
+function M.open(entry, opts)
+  opts = opts or {}
+  local api = opts.api or vim.api
+  local buf, rendered = M.build_summary_buf(entry, api)
 
   local columns = vim.o.columns or 120
   local lines_total = vim.o.lines or 40

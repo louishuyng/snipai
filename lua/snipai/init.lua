@@ -130,7 +130,26 @@ function M.setup(opts)
   -- binding for the same lhs, so no cleanup needed.
   keymaps_mod.apply(merged.keymaps, { keymap_set = deps.keymap_set })
 
+  -- Soft-stop active PTY sessions when Neovim quits, so no orphan
+  -- `claude` processes survive the editor. The autocmd is idempotent:
+  -- a re-setup replaces the group.
+  if vim and vim.api and vim.api.nvim_create_augroup then
+    local group = vim.api.nvim_create_augroup("snipai_cleanup", { clear = true })
+    vim.api.nvim_create_autocmd("VimLeavePre", {
+      group = group,
+      callback = function()
+        M._on_vim_leave_pre()
+      end,
+    })
+  end
+
   return M
+end
+
+function M._on_vim_leave_pre()
+  if state.jobs and type(state.jobs.cancel_all) == "function" then
+    state.jobs:cancel_all()
+  end
 end
 
 -- ---------------------------------------------------------------------------

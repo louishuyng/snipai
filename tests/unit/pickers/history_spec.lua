@@ -57,7 +57,7 @@ describe("snipai.pickers.history", function()
         duration_ms = 2300,
         files_changed = { "a", "b" },
       }))
-      assert.matches("^%+", row) -- success glyph
+      assert.matches("^✓", row) -- complete glyph (success aliased)
       assert.matches("scaffold", row)
       assert.matches("2%.3s", row)
       assert.matches("2 files", row)
@@ -74,9 +74,11 @@ describe("snipai.pickers.history", function()
     end)
 
     it("glyph varies by status", function()
-      assert.matches("^%+", picker.format_row(make_entry({ snippet = "s", status = "success" })))
-      assert.matches("^x", picker.format_row(make_entry({ snippet = "s", status = "error" })))
-      assert.matches("^~", picker.format_row(make_entry({ snippet = "s", status = "cancelled" })))
+      assert.matches("^✓", picker.format_row(make_entry({ snippet = "s", status = "complete" })))
+      assert.matches("^✓", picker.format_row(make_entry({ snippet = "s", status = "success" })))
+      assert.matches("^!", picker.format_row(make_entry({ snippet = "s", status = "error" })))
+      assert.matches("^✗", picker.format_row(make_entry({ snippet = "s", status = "cancelled" })))
+      assert.matches("^◦", picker.format_row(make_entry({ snippet = "s", status = "idle" })))
       assert.matches("^…", picker.format_row(make_entry({ snippet = "s", status = "running" })))
     end)
 

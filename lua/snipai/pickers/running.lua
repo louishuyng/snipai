@@ -49,8 +49,23 @@ local function basename(path)
   return path:match("([^/]+)$") or path
 end
 
+-- Status glyphs for the 5-state lifecycle. 'success' is treated as an
+-- alias for 'complete' (legacy entries from before the lifecycle rename).
+local GLYPH = {
+  running = "…",
+  idle = "◦",
+  complete = "✓",
+  success = "✓",
+  cancelled = "✗",
+  error = "!",
+}
+
+local function glyph(status)
+  return GLYPH[status] or "?"
+end
+
 -- Row shape, example:
---   scaffold  [running]  3.1s  abc-12de  (init.lua)
+--   … scaffold  3.1s  abc-12de  (init.lua)
 function M.format_row(job, now_ms)
   local name = (type(job.snippet_name) == "function" and job:snippet_name()) or "(unknown)"
   local status = (type(job.status) == "function" and job:status()) or "?"
@@ -63,10 +78,7 @@ function M.format_row(job, now_ms)
     duration = format_duration(now_ms - started)
   end
 
-  local bits = {
-    name,
-    ("[%s]"):format(status),
-  }
+  local bits = { glyph(status), name }
   if duration ~= "" then
     bits[#bits + 1] = duration
   end
@@ -155,7 +167,7 @@ function M.open(opts)
   end
   local now_ms = now_fn()
 
-  local detail = opts.detail or require("snipai.ui.detail")
+  local detail_tabs = opts.detail or require("snipai.ui.detail_tabs")
 
   ts.pickers
     .new({}, {
@@ -179,11 +191,14 @@ function M.open(opts)
           if entry and entry.value then
             local job = entry.value
             local history_entry = opts.history:get(job:id())
-            if history_entry then
-              detail.open(history_entry)
-            else
+            if not history_entry then
               notify(opts.notify, "no history entry for job " .. job:id(), "warn")
+              return
             end
+            local term_buf = opts.jobs:get_terminal_buf(job:id())
+            detail_tabs.open(history_entry, { terminal_buf = term_buf })
+            -- Land the user directly on the terminal tab — that is the
+            -- whole point of picking an active job.
           end
         end)
 
@@ -206,5 +221,6 @@ end
 M._format_duration = format_duration
 M._short_id = short_id
 M._basename = basename
+M._glyph = glyph
 
 return M

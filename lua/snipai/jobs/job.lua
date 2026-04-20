@@ -5,9 +5,11 @@
 -- subscribes to the bus or reads history; it never pokes at Job state.
 --
 -- Lifecycle:
---   pending ──► running ──► success | error | cancelled
+--   pending ──► running ⇄ idle ──► complete | cancelled | error
 --
--- State transitions happen inside :start() and :_on_exit() only.
+-- running↔idle flips on parser "result" events (turn done → idle;
+-- any subsequent event → running). Terminal transitions fire in
+-- :_on_exit() based on the PTY's exit code + cancelled flag.
 --
 -- files_changed accumulation:
 --   Edit / Write / MultiEdit tool_use events carry an input.file_path.
@@ -15,9 +17,9 @@
 --   history.finalize so :SnipaiToQuickfix can build qf entries later.
 --
 -- stderr policy:
---   * success  -> persist, no notification
---   * error    -> persist, first non-blank stderr line (or "exit N") in
---                 the "failed" notification
+--   * complete  -> persist, no notification
+--   * error     -> persist, first non-blank stderr line (or "exit N")
+--                  in the "failed" notification
 --   * cancelled -> persist whatever was buffered before SIGTERM, but do
 --                  not splice stderr into the notification (it's noise
 --                  from the interrupt, not a real failure)
@@ -199,11 +201,22 @@ function Job:history_entry()
 end
 
 function Job:is_running()
-  return self._status == "running"
+  return self._status == "running" or self._status == "idle"
 end
 
 function Job:is_done()
-  return self._status == "success" or self._status == "error" or self._status == "cancelled"
+  return self._status == "complete" or self._status == "cancelled" or self._status == "error"
+end
+
+function Job:session_id()
+  return self._session_id
+end
+
+function Job:terminal_buf()
+  if self._handle and type(self._handle.bufnr) == "function" then
+    return self._handle:bufnr()
+  end
+  return nil
 end
 
 -- ---------------------------------------------------------------------------
@@ -215,6 +228,21 @@ function Job:start()
     return nil, ("job already %s"):format(self._status)
   end
 
+  -- Mint the session id up front so history.add_pending writes it in
+  -- the initial row (not a separate patch later). The runner accepts
+  -- opts.session_id and uses it verbatim; if no runner exposes session
+  -- ids (e.g. a hand-rolled fake runner in tests), the field is nil
+  -- and downstream code treats the job as legacy.
+  local claude_opts = self._claude_opts or {}
+  local runner_has_session_ids = self._runner.generate_session_id ~= nil
+  if runner_has_session_ids and not claude_opts.session_id then
+    claude_opts = vim.tbl_extend("force", {}, claude_opts, {
+      session_id = self._runner.generate_session_id(),
+    })
+  end
+  self._session_id = claude_opts.session_id
+  self._claude_opts = claude_opts
+
   self._started_at = self._now()
   local entry, err = self._history:add_pending({
     id = self._id,
@@ -223,6 +251,7 @@ function Job:start()
     params = self._params,
     prompt = self._prompt,
     started_at = self._started_at,
+    session_id = self._session_id,
   })
   if not entry then
     self._status = "error"
@@ -234,7 +263,7 @@ function Job:start()
   self._status = "running"
   self._events:emit("job_started", self)
 
-  self._handle = self._runner.spawn(self._prompt, self._claude_opts, function(evt)
+  self._handle = self._runner.spawn(self._prompt, claude_opts, function(evt)
     self:_on_event(evt)
   end, function(code, info)
     self:_on_exit(code, info)
@@ -276,6 +305,14 @@ function Job:_track_file(evt)
 end
 
 function Job:_on_event(evt)
+  -- Turn boundaries drive the running↔idle split. A "result" event
+  -- ends the current turn; any later event means Claude is working
+  -- again (the user typed a follow-up or the next turn started).
+  if evt.kind == "result" and self._status == "running" then
+    self._status = "idle"
+  elseif evt.kind ~= "result" and self._status == "idle" then
+    self._status = "running"
+  end
   self:_track_file(evt)
   self._events:emit("job_progress", self, evt)
 end
@@ -285,7 +322,7 @@ function Job:_classify(code, info)
     return "cancelled"
   end
   if code == 0 then
-    return "success"
+    return "complete"
   end
   return "error"
 end
@@ -319,7 +356,7 @@ function Job:_on_exit(code, info)
   end
 
   if self._progress then
-    if status == "success" then
+    if status == "complete" then
       self._progress:finish(success_message(self._files_changed, duration_ms), "info")
     elseif status == "cancelled" then
       self._progress:finish("cancelled", "warn")

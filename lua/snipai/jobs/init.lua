@@ -116,6 +116,20 @@ function Manager:cancel(id)
   return job:cancel()
 end
 
+-- Returns the PTY terminal buffer for an active job, or nil if the
+-- runner backend did not produce one (test fakes, or a job already
+-- moved out of the active set on job_done).
+function Manager:get_terminal_buf(id)
+  local job = self._active[id]
+  if not job then
+    return nil
+  end
+  if type(job.terminal_buf) == "function" then
+    return job:terminal_buf()
+  end
+  return nil
+end
+
 function Manager:cancel_all()
   local cancelled = 0
   for _, job in pairs(self._active) do

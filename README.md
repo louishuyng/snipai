@@ -28,14 +28,15 @@ https://github.com/user-attachments/assets/3870ebd4-c056-4ab8-a38e-c8a3d1d7220c
 5. [Snippet JSON schema](#snippet-json-schema)
 6. [Commands](#commands)
 7. [Default keybindings](#default-keybindings)
-8. [Configuration](#configuration)
-9. [Statusline integration](#statusline-integration)
-10. [Events](#events)
-11. [Troubleshooting](#troubleshooting)
-12. [FAQ](#faq)
-13. [Roadmap](#roadmap)
-14. [Contributing](#contributing)
-15. [License](#license)
+8. [Running sessions](#running-sessions)
+9. [Configuration](#configuration)
+10. [Statusline integration](#statusline-integration)
+11. [Events](#events)
+12. [Troubleshooting](#troubleshooting)
+13. [FAQ](#faq)
+14. [Roadmap](#roadmap)
+15. [Contributing](#contributing)
+16. [License](#license)
 
 ---
 
@@ -43,12 +44,15 @@ https://github.com/user-attachments/assets/3870ebd4-c056-4ab8-a38e-c8a3d1d7220c
 
 - **Snippet-as-prompt.** JSON snippets with a `body` template + typed parameters; the body becomes the Claude prompt.
 - **Typed parameters.** `string`, `text`, `select`, `boolean` — validated before the run.
+- **Interactive session terminal.** Every snippet fires a persistent `claude` session in a hidden PTY. Open it from `<leader>sr` to watch Claude work and type follow-up turns; close it when you're done.
+- **5-state lifecycle.** `running / idle / complete / cancelled / error` with glyphs in pickers, so you can tell at a glance which sessions are producing, which are waiting for your next message, and which have finished.
 - **Global + per-project libraries.** Project `.snipai.json` overrides global snippets by name.
 - **Filetype scoping.** Optional `filetype` field keeps language-specific snippets out of other buffers.
-- **Concurrent runs** with per-job notifications and spinner.
-- **Persistent history.** JSONL log per project, survives restarts.
-- **Structured progress.** File changes and tool uses are parsed from Claude's `stream-json` output — no stdout scraping. A live tool-use counter inside the notification is scheduled for v0.2.0; today the run emits a single completion toast.
+- **Concurrent sessions** with per-job notifications and spinner.
+- **Persistent history.** JSONL log per project, survives restarts. One row per session, `files_changed` accumulates across every turn.
+- **Structured progress.** Tool uses are parsed from Claude's on-disk session transcript — no stdout scraping, even though the PTY is fully interactive.
 - **Quickfix integration** for any past run's file changes.
+- **Tabbed detail popup.** `:SnipaiDetail` opens Summary + Terminal tabs; `<Tab>` swaps between the facts and the live conversation.
 - **Completion via nvim-cmp**; blink.cmp adapter on the roadmap.
 - **Telescope pickers** for active jobs and history.
 - **Notification auto-detect** (`nvim-notify` / `fidget.nvim` / `vim.notify`).
@@ -60,8 +64,8 @@ https://github.com/user-attachments/assets/3870ebd4-c056-4ab8-a38e-c8a3d1d7220c
 
 | Requirement | Version | Why |
 |---|---|---|
-| Neovim | **0.10+** | `vim.system`, `vim.uv`, `vim.islist` |
-| Claude Code CLI | latest | the plugin shells out to `claude -p` |
+| Neovim | **0.10+** | `vim.fn.termopen`, `vim.uv.fs_poll`, `vim.islist` |
+| Claude Code CLI | latest (supports `--session-id`) | the plugin hosts `claude` under a PTY with a fixed session UUID |
 | `hrsh7th/nvim-cmp` | recent | completion source |
 | `nvim-telescope/telescope.nvim` | recent | pickers for running jobs + history |
 | `rcarriga/nvim-notify` *or* `j-hui/fidget.nvim` | optional | richer progress toasts; falls back to `vim.notify` |
@@ -234,13 +238,13 @@ Invalid snippets are **skipped** (not aborted), with one notification pointing a
 
 | Command | Description |
 |---|---|
-| `:SnipaiRunning` | Telescope picker of currently running snippet jobs |
+| `:SnipaiRunning` | Telescope picker of currently running snippet sessions |
 | `:SnipaiHistory` | History picker scoped to current project (alias for `project`) |
 | `:SnipaiHistory project` | Same as above |
 | `:SnipaiHistory all` | History picker across every project |
-| `:SnipaiDetail <id>` | Open a detail popup for a history entry |
+| `:SnipaiDetail <id>` | Open the tabbed detail popup (Summary + Terminal) |
 | `:SnipaiToQuickfix <id>` | Push a history entry's `files_changed` into the quickfix list |
-| `:SnipaiCancel <id>` | Cancel a running job (SIGTERM the Claude subprocess) |
+| `:SnipaiCancel <id>` | Cancel a running session (SIGTERM the PTY-hosted `claude`) |
 | `:SnipaiReload` | Re-read all JSON snippet configs |
 | `:SnipaiTrigger <name>` | Run a snippet by name without going through `nvim-cmp` (useful for keymaps) |
 
@@ -260,19 +264,56 @@ Invalid snippets are **skipped** (not aborted), with one notification pointing a
 
 | Key | Action |
 |---|---|
-| `<CR>` | Open detail popup |
-| `<C-c>` | Cancel the selected job |
+| `<CR>` | Open tabbed detail popup (Summary + Terminal) |
+| `<C-c>` | Cancel the selected session |
 
 **Inside the history picker (buffer-local):**
 
 | Key | Action | Status |
 |---|---|---|
-| `<CR>` | Open detail popup | — |
+| `<CR>` | Open tabbed detail popup | — |
 | `<C-q>` | Push the entry's file changes into the quickfix list and close | — |
-| `<C-r>` | Replay the snippet with its original parameters | **v0.2.0** — not yet wired |
-| `<C-d>` | Delete the history entry | **v0.2.0** — not yet wired |
+| `<C-r>` | Replay the snippet with its original parameters | **v0.3.0** — not yet wired |
+| `<C-d>` | Delete the history entry | **v0.3.0** — not yet wired |
+
+**Inside the detail popup (buffer-local):**
+
+| Key | Action |
+|---|---|
+| `<Tab>` / `<S-Tab>` | Swap between Summary and Terminal tabs |
+| `q` / `<Esc>` | Close the popup |
+
+The Terminal tab attaches to the session's live PTY. Enter Terminal-Insert mode (`i`) to send follow-up messages to Claude. `<C-c>` interrupts a generating turn; `/exit` ends the session cleanly. `:bd!` on the terminal buffer marks the history entry `cancelled`.
 
 Remap any of these via `setup({ keymaps = { … } })`, or pass `keymaps = false` to disable every default and bind everything manually.
+
+---
+
+## Running sessions
+
+Every snippet fires an interactive `claude` session, not a one-shot invocation. The PTY runs in a hidden scratch buffer; the v0.1.0 notification toast appears as before, and your editor stays focused where it was. Open the session on demand (`<leader>sr` → `<CR>`) to watch the transcript, send follow-up messages, or cancel.
+
+**Glyphs** carry the session's current state in both pickers:
+
+| Glyph | State | Meaning |
+|---|---|---|
+| `…` | `running` | PTY alive, Claude is producing output or running a tool |
+| `◦` | `idle`   | PTY alive, Claude has finished its turn and is waiting for you |
+| `✓` | `complete` | PTY exited 0 (`/exit`, window closed cleanly) |
+| `✗` | `cancelled` | `:SnipaiCancel` or `:bd!` killed the PTY |
+| `!` | `error`  | PTY exited non-zero without a cancel |
+
+A single session is one history entry — if you open a session with `<leader>sr`, type three follow-up messages, and `/exit`, that's still one row. `files_changed` and `duration_ms` accumulate across all turns.
+
+**Action semantics:**
+
+| Action | Behaviour |
+|---|---|
+| Stop (`:SnipaiCancel <id>` or `<C-c>` in the running picker) | SIGTERM the PTY via `vim.fn.jobstop` (Neovim escalates to SIGKILL). History status → `cancelled`. Files captured before the kill are preserved. |
+| Re-trigger the same snippet while an earlier session is still open | Always spawns a **new session** with a fresh UUID and a fresh history row. Concurrent sessions are legal; re-triggering never resumes an existing one. |
+| Retry after an error | Same as re-trigger — fresh session, original params re-used. Explicitly resuming an old session (`claude --resume`) lands in v0.3.0 as `<C-r>` in the history picker. |
+
+When you quit Neovim, a `VimLeavePre` autocmd soft-stops every active session so no orphan `claude` processes survive the editor.
 
 ---
 

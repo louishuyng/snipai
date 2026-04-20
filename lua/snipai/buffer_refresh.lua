@@ -1,15 +1,9 @@
--- Open-buffer refresh on job completion.
+-- Reloads open Neovim buffers whose file was touched by a Claude run.
 --
--- Why this exists: Claude's Edit / Write tools land on disk, but
--- Neovim does not auto-reload open buffers pointing at those files —
--- they keep showing the pre-Claude content until the user hits `:e!`.
--- Subscribing to `job_done` and running `:checktime` per touched file
--- makes the enrichment visible immediately. Buffers whose file Claude
--- never touched, and files the user never opened, are skipped —
--- nothing to reload in either case.
---
--- M.attach(events, refresh_fn?) subscribes to the given bus. The
--- actual refresh is pluggable via opts / argument for tests.
+-- Long sessions edit files across many turns, so we refresh as each
+-- new file appears (job_progress) instead of only on job_done. A
+-- per-job dedup set stops a single path from being refreshed twice
+-- inside one run.
 
 local M = {}
 
@@ -35,22 +29,52 @@ end
 
 -- attach(events, refresh_fn?)
 --   events     event bus with :subscribe
---   refresh_fn optional; fn(files_changed) — defaults to a :checktime
---              loop over loaded buffers whose name is in the list
+--   refresh_fn optional; fn(files_changed). Production default refreshes
+--              loaded buffers; tests pass a recorder.
 --
--- Returns the unsubscribe handle returned by events:subscribe, for
--- callers that want to detach later. Each setup() call binds to a
--- fresh events bus, so in production the handle is usually ignored.
+-- Returns an unsubscribe fn that detaches both subscriptions at once.
 function M.attach(events, refresh_fn)
   assert(type(events) == "table", "buffer_refresh.attach: events required")
   local refresh = refresh_fn or default_refresh
-  return events:subscribe("job_done", function(job)
-    local files = job and type(job.files_changed) == "function" and job:files_changed() or {}
-    refresh(files)
+  -- per-job dedup: weak-keyed so completed jobs get garbage-collected.
+  local seen_by_job = setmetatable({}, { __mode = "k" })
+
+  local function refresh_new(job)
+    if not job or type(job.files_changed) ~= "function" then
+      return
+    end
+    local all = job:files_changed()
+    local already = seen_by_job[job] or {}
+    local fresh = {}
+    for _, path in ipairs(all) do
+      if not already[path] then
+        already[path] = true
+        fresh[#fresh + 1] = path
+      end
+    end
+    seen_by_job[job] = already
+    if #fresh > 0 then
+      refresh(fresh)
+    end
+  end
+
+  local unsub_progress = events:subscribe("job_progress", function(job, _evt)
+    refresh_new(job)
   end)
+  local unsub_done = events:subscribe("job_done", function(job)
+    refresh_new(job)
+  end)
+
+  return function()
+    if unsub_progress then
+      unsub_progress()
+    end
+    if unsub_done then
+      unsub_done()
+    end
+  end
 end
 
--- Exposed for tests.
 M._default_refresh = default_refresh
 
 return M

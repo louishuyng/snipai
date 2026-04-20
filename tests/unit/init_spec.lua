@@ -517,7 +517,7 @@ describe("snipai (top-level)", function()
       local entries = snipai.history.list({ scope = "all" })
       assert.equals(1, #entries)
       assert.equals(job:id(), entries[1].id)
-      assert.equals("success", entries[1].status)
+      assert.equals("complete", entries[1].status)
     end)
 
     it("get and clear work through the facade", function()
@@ -525,7 +525,7 @@ describe("snipai (top-level)", function()
       local job = snipai.trigger("no_params")
       deps.runner.spawns[1].on_exit(0, { cancelled = false, stderr = "", parser_errors = {} })
 
-      assert.equals("success", snipai.history.get(job:id()).status)
+      assert.equals("complete", snipai.history.get(job:id()).status)
       snipai.history.clear()
       assert.are.same({}, snipai.history.list({ scope = "all" }))
     end)
@@ -550,7 +550,7 @@ describe("snipai (top-level)", function()
       deps.runner.spawns[1].on_exit(0, { cancelled = false, stderr = "", parser_errors = {} })
 
       local entry = snipai.history.get(job:id())
-      assert.equals("success", entry.status)
+      assert.equals("complete", entry.status)
       assert.are.same({ "x.ts" }, entry.files_changed)
 
       assert.equals(2, #bus_events)
@@ -563,7 +563,7 @@ describe("snipai (top-level)", function()
       assert.matches("1 file", deps.notify_calls[#deps.notify_calls].msg)
     end)
 
-    it("refreshes affected buffers after job_done", function()
+    it("refreshes affected buffers incrementally as tool_use events arrive", function()
       local refresh_calls = {}
       local deps = setup_with_fixture({
         refresh_buffers = function(files)
@@ -582,11 +582,14 @@ describe("snipai (top-level)", function()
         input = { file_path = "b.lua" },
       })
       deps.runner.spawns[1].on_exit(0, { cancelled = false, stderr = "", parser_errors = {} })
-      assert.equals(1, #refresh_calls)
-      assert.are.same({ "a.lua", "b.lua" }, refresh_calls[1])
+      -- Each new path triggers one refresh on its job_progress event;
+      -- job_done adds nothing because both are already deduped.
+      assert.equals(2, #refresh_calls)
+      assert.are.same({ "a.lua" }, refresh_calls[1])
+      assert.are.same({ "b.lua" }, refresh_calls[2])
     end)
 
-    it("passes an empty list to refresh_buffers when no files changed", function()
+    it("skips refresh_buffers when no files were touched", function()
       local refresh_calls = {}
       local deps = setup_with_fixture({
         refresh_buffers = function(files)
@@ -595,8 +598,7 @@ describe("snipai (top-level)", function()
       })
       snipai.trigger("no_params")
       deps.runner.spawns[1].on_exit(0, { cancelled = false, stderr = "", parser_errors = {} })
-      assert.equals(1, #refresh_calls)
-      assert.are.same({}, refresh_calls[1])
+      assert.equals(0, #refresh_calls)
     end)
 
     it("cancel: history marked cancelled, files captured before SIGTERM preserved", function()
